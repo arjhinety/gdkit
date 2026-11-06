@@ -1,0 +1,37 @@
+[project]
+name = "gdkit"
+dynamic = ["version"]
+description = "Gradient kit: provenance and preflight checks for ML research repositories."
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
+requires-python = ">=3.11"
+dependencies = ["pyyaml>=6"]
+urls = { Homepage = "https://github.com/arjhinety/gdkit", Issues = "https://github.com/arjhinety/gdkit/issues" }
+keywords = ["machine learning", "reproducibility", "provenance", "preregistration", "research"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["gdkit"]
+
+[tool.setuptools.dynamic]
+version = { attr = "gdkit.__version__" }
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# vendor/opengrad holds the pinned OpenGrad modules listed in SOURCE.lock.
+pythonpath = [".", "tests", "vendor/opengrad"]

@@ -1,0 +1,89 @@
+# Attestation for expensive gates. Runs only after a required reviewer approves the
+# "attestation" environment, which is what releases the signing key.
+#
+# Setup (owner, once): create the "attestation" environment with required reviewers (the owner),
+# restrict it to the main branch, and store the SSH signing private key as the environment secret
+# ATTEST_SIGNING_KEY. The public key goes into .gdkit/allowed_signers in the repo.
+#
+# What this proves: the receipt hash was committed, its inputs match, and the owner approved this
+# run in the environment. It does not prove the expensive job ran. That is what the reviewer checks.
+#
+# Token use: the default GITHUB_TOKEN is given to the push step only. Checkout does not persist it,
+# so repository code (pip install, the gate registry) never sees it.
+name: attest
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "Run to attest (directory name under runs/)"
+        required: true
+        type: string
+      gate:
+        description: "Expensive gate name whose receipt is attested"
+        required: true
+        type: string
+      registry:
+        description: "module:ATTRIBUTE holding the gate registry"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  attest:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: attestation
+    permissions:
+      contents: write
+    env:
+      RUN_ID: ${{ inputs.run_id }}
+      GATE: ${{ inputs.gate }}
+      REGISTRY: ${{ inputs.registry }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install gdkit
+        run: pip install -e .
+
+      - name: Validate the receipt and print its hash
+        id: receipt
+        run: |
+          set -euo pipefail
+          case "$RUN_ID" in
+            ""|*[!A-Za-z0-9_-]*) echo "refused: run_id may use only letters, digits, '_' and '-'" >&2; exit 1 ;;
+          esac
+          DIGEST="$(python -m gdkit.cli --registry "$REGISTRY" attest "runs/$RUN_ID" "$GATE" --project .gdkit/project.yaml)"
+          if ! printf '%s' "$DIGEST" | grep -Eq '^[0-9a-f]{64}$'; then
+            echo "refused: the receipt hash is not a sha256 hex string" >&2
+            exit 1
+          fi
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+
+      - name: Sign and push the attestation tag
+        env:
+          SIGNING_KEY: ${{ secrets.ATTEST_SIGNING_KEY }}
+          DIGEST: ${{ steps.receipt.outputs.digest }}
+          PUSH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          KEY_FILE="$RUNNER_TEMP/attest_key"
+          trap 'rm -f "$KEY_FILE"' EXIT
+          umask 077
+          printf '%s\n' "$SIGNING_KEY" > "$KEY_FILE"
+          git config user.name "gdkit-attest"
+          git config user.email "attest@gdkit.invalid"
+          git config gpg.format ssh
+          git config user.signingkey "$KEY_FILE"
+          git tag -s "attest/$RUN_ID" -m "$DIGEST"
+          AUTH="$(printf 'x-access-token:%s' "$PUSH_TOKEN" | base64 -w0)"
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $AUTH" push origin "refs/tags/attest/$RUN_ID"

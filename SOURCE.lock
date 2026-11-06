@@ -1,0 +1,4 @@
+# Vendored from OpenGrad. Do not edit vendored files by hand.
+upstream: OpenGrad (https://github.com/arjhinety/OpenGrad), Apache-2.0, see NOTICE
+commit: 22268f8137f8bcf0e3321722f6010b711d4a4418
+vendor/opengrad/opengrad/hashing.py  sha256=6819799e404bfcb5c8ee9796f857faa45807df692a55904c1cab32d38442fd71

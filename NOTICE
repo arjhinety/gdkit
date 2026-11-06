@@ -1,0 +1,15 @@
+gdkit
+Copyright gdkit contributors.
+
+gdkit is licensed under the Apache License, Version 2.0. See LICENSE.
+
+This product includes code vendored from OpenGrad, licensed under the Apache License, Version 2.0:
+
+  vendor/opengrad/opengrad/hashing.py
+  upstream: https://github.com/arjhinety/OpenGrad
+  commit: 22268f8137f8bcf0e3321722f6010b711d4a4418
+  recorded hash: see SOURCE.lock
+
+The upstream OpenGrad NOTICE file, reproduced as published:
+
+OpenGrad source code is licensed under the Apache License, Version 2.0. The license applies only to original OpenGrad source code and documentation unless a file states otherwise. Third-party datasets, pretrained models, checkpoints, benchmark assets, papers, and imported code retain their own licenses and terms; see registry metadata and associated source pages.

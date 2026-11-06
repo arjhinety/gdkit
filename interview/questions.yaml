@@ -1,0 +1,137 @@
+# /overfit-clinic interview, v0.2-draft. Loaded by gdkit.doctor, gdkit.clinic and gdkit.skill_api.
+#
+# Each answer is written to .gdkit/project.yaml. Explore runs may leave a required-for-registered
+# answer as UNSET. Registered runs refuse UNSET values. No answer has a default, because a default
+# would be a pre-registration value nobody chose.
+#
+# Answer types: text, number, enum, path, list, sha256, boolean.
+
+version: 0.2-draft
+
+questions:
+  - id: study_question
+    ask: "What is the one question this study answers? State it so a result could come back no."
+    type: text
+    required_for: [registered]
+    why: "The plan review checks that the eval protocol can answer this question."
+
+  - id: claim_type
+    ask: "What kind of claim will the result support?"
+    type: enum
+    values: [capability, safety, efficiency, reproduction, exploratory]
+    required_for: [registered]
+    why: "Decides which general-capability checks apply."
+
+  - id: raw_data_source
+    ask: "Where does the raw data come from? Give a path or a dataset ID with its revision."
+    type: text
+    required_for: [registered]
+    why: "Registered runs need an immutable revision, not a moving branch."
+
+  - id: raw_data_revision_sha256
+    ask: "What is the sha256 of the raw data file as it was received?"
+    type: sha256
+    required_for: [registered]
+
+  - id: data_license
+    ask: "What licence does the raw data carry, and is redistribution allowed?"
+    type: text
+    required_for: [registered]
+
+  - id: base_model_revision
+    ask: "Which base model, at which revision (commit hash or immutable release)?"
+    type: text
+    required_for: [registered]
+    why: "A moving tag is not a revision. The model card records this value."
+
+  - id: eval_harness_sha256
+    ask: "What is the sha256 of the eval harness code you will run?"
+    type: sha256
+    required_for: [registered]
+
+  - id: prompt_template_sha256
+    ask: "What is the sha256 of the prompt or chat template the model will see?"
+    type: sha256
+    required_for: [registered]
+
+  - id: primary_metric
+    ask: "What is the primary metric, and what value counts as success?"
+    type: text
+    required_for: [registered]
+    why: "Written before any result exists. Changing it later is a new study."
+
+  - id: kill_criteria
+    ask: "What result would make you stop this line of work? Name a number."
+    type: text
+    required_for: [registered]
+
+  - id: general_capability_suite
+    ask: "Which general-capability suite will the candidate be compared on, and against which parent?"
+    type: list
+    required_for: [registered]
+    why: "Study 001 failed here. The suite must include the failure modes you would be embarrassed to miss."
+
+  - id: general_capability_margin
+    ask: "How much may the candidate drop on that suite compared with its parent before the run fails? Give a number and a unit."
+    type: text
+    required_for: [registered]
+    why: "No default. A margin you did not choose is not a pre-registration."
+
+  - id: refusal_threshold
+    ask: "What refusal rate on answerable items is too high? Give a number."
+    type: number
+    required_for: [registered]
+
+  - id: expensive_gates
+    ask: "Which gates train, run model inference, or call an external judge? List them."
+    type: list
+    required_for: [registered]
+    why: "These need an attestation before promotion. Cheap gates are re-run instead."
+
+  - id: needs_paper_lookup
+    ask: "Will this study cite papers or benchmarks through the Papers With Code CLI?"
+    type: boolean
+    required_for: []
+    why: "If yes, the kit checks that pwc is installed and records every lookup."
+
+  - id: baseline
+    ask: "What simple baseline must the candidate beat, and what is its score on the primary metric? A trivial model, the current process, or the parent model all count."
+    type: text
+    required_for: [registered]
+    why: "A candidate with no baseline has no evidence it beats anything. Raised by three independent sources."
+
+  - id: split_protocol
+    ask: "How is the data split into train, validation and test? Is the split time-based where the data is temporal? Freeze the split before modelling."
+    type: text
+    required_for: [registered]
+    why: "Splits must be fixed and recorded so leakage can be checked."
+
+  - id: test_access
+    ask: "Has anyone looked at the test data, or used it to make a decision, before this run? Answer yes or no, and say how."
+    type: text
+    required_for: [registered]
+    why: "Prior access to the test set weakens a clean result. Hofman et al. ask this directly."
+
+  - id: uncertainty_method
+    ask: "How will uncertainty be reported? Give the number of seeds or repeats, and whether the error bar is a standard deviation or a standard error."
+    type: text
+    required_for: [registered]
+    why: "The reader needs to know which one the error bar means. NeurIPS checklist item 7."
+
+  - id: evaluation_slices
+    ask: "Which subgroups, conditions or data slices must the results be reported on, separately?"
+    type: list
+    required_for: [registered]
+    why: "An aggregate score can hide a failure in one slice. The refusal check needs its slice named."
+
+  - id: intended_use
+    ask: "What is the model for, and what is it not for?"
+    type: text
+    required_for: [registered]
+    why: "Model cards and datasheets both ask for this."
+
+  - id: owner_signer
+    ask: "Who approves attestations for this study?"
+    type: text
+    required_for: [registered]
+    why: "Custody is an open decision. This answer records who is named, not how the key is held."

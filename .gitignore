@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.venv/
+build/
+dist/
+*.egg-info/
+
+# This study's data: the answers file and run directories stay out of the tool's repository.
+# .gdkit/allowed_signers is NOT ignored: the attest workflow reads it, so commit it on purpose.
+.gdkit/project.yaml
+runs/
