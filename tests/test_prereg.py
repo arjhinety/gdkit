@@ -16,7 +16,7 @@ from gdkit.prereg import PREREG_OP, PreregError, answers_digest, check_answers, 
 from gdkit.promote import PromoteError, attestable_hash, promote
 
 QUESTIONS = load_questions(Path(__file__).resolve().parents[1] / "interview" / "questions.yaml")
-ACCEPT = lambda run_id, digest: True  # noqa: E731
+ACCEPT = lambda run_id, gate, digest: True  # noqa: E731
 H = "a" * 64
 
 
@@ -154,3 +154,42 @@ def test_the_cli_attest_refuses_a_changed_answer(tmp_path):
     )
     assert result.returncode == 1
     assert "answers changed since the run started" in result.stderr
+
+
+def test_the_freeze_copies_the_replaced_unset_list_into_the_ledger(tmp_path):
+    from gdkit.interview import REPLACED_UNSET_KEY
+
+    run = tmp_path / "run"
+    run.mkdir()
+    project = tmp_path / "project.yaml"
+    project.write_text(yaml.safe_dump({"study_question": "q", "baseline": "b", REPLACED_UNSET_KEY: ["baseline"]}),
+                       encoding="utf-8")
+    entry = freeze_run(Ledger(run / "ledger.jsonl", run_id="r", mode="registered"), project)
+    assert entry["params"]["replaced_unset"] == ["baseline"]
+    assert REPLACED_UNSET_KEY not in entry["params"]["answers"]
+
+
+def test_a_freeze_with_no_replacements_records_an_empty_list(tmp_path):
+    run = tmp_path / "run"
+    run.mkdir()
+    project = tmp_path / "project.yaml"
+    project.write_text(yaml.safe_dump({"study_question": "q"}), encoding="utf-8")
+    entry = freeze_run(Ledger(run / "ledger.jsonl", run_id="r", mode="registered"), project)
+    assert entry["params"]["replaced_unset"] == []
+
+
+def test_removing_the_replaced_unset_list_after_the_freeze_is_detected(tmp_path):
+    from gdkit.interview import REPLACED_UNSET_KEY
+    from gdkit.prereg import check_answers
+
+    run = tmp_path / "run"
+    run.mkdir()
+    project = tmp_path / "project.yaml"
+    project.write_text(yaml.safe_dump({"study_question": "q", REPLACED_UNSET_KEY: ["study_question"]}),
+                       encoding="utf-8")
+    ledger = Ledger(run / "ledger.jsonl", run_id="r", mode="registered")
+    entry = freeze_run(ledger, project)
+    assert check_answers([entry], project) == []
+    project.write_text(yaml.safe_dump({"study_question": "q"}), encoding="utf-8")
+    problems = check_answers([entry], project)
+    assert problems and REPLACED_UNSET_KEY in problems[0]

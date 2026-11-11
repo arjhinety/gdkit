@@ -19,13 +19,23 @@ is validated and saved by `gdkit.skill_api`. You never write `.gdkit/project.yam
    `--value-file`, so punctuation cannot break the command.
 4. **Mode.** Ask once at the start: explore (light, UNSET allowed) or registered (full preflight). Use the same mode for
    the whole session.
-5. **Answers freeze when a run starts.** Say so at the end. `set` refuses to change an answer already in the file. When
-   `promote` or `gdkit.cli attest` runs, it refuses a registered run whose answers differ from the frozen copy in its first
-   ledger entry, and names the changed question. To change an answer after a run has started, the user starts a new run.
-6. **Papers.** If `needs_paper_lookup` is yes, run `command -v pwc` and tell the user the result. If pwc is missing,
+5. **Answers freeze when a run starts.** Say so at the end. `set` refuses to change an answer already in the file, with
+   one exception: in registered mode, a required question left `UNSET` in explore mode is asked again. When `next` returns
+   `replaces_unset: true` (the question was `UNSET` or skipped in explore mode), tell the user that this answer is being
+   given after an explore run and will be listed under `replaced_unset` in the file and in the run's preregistration entry.
+   When `promote` or `gdkit.cli attest` runs, it refuses a registered run whose answers differ from the frozen copy in its
+   first ledger entry, and names the changed question. To change an answer after a run has started, the user starts a new
+   run.
+6. **Changing an answer before a run.** Only when the user explicitly asks to change an answer that is already in the file,
+   use `change` (below). Say first that the change is declared under `changed_after_explore` and shown on the model card,
+   and read the new answer back. Never use `change` or `declare` to fix a refusal on your own initiative. A registered
+   freeze refuses any difference from an earlier explore run that is not declared, and prints a `declare` command for
+   each one. Show the user each difference, explain that it may have been chosen after the explore run saw the data, and
+   run a `declare` command only after the user confirms that one.
+7. **Papers.** If `needs_paper_lookup` is yes, run `command -v pwc` and tell the user the result. If pwc is missing,
    say that lookups will be recorded as UNAVAILABLE until it is installed, and give the pwc project's install
    instructions. Do not guess the install command.
-7. **Stop cleanly.** If the user stops partway, the answers so far are already saved. Say so, and say how to resume.
+8. **Stop cleanly.** If the user stops partway, the answers so far are already saved. Say so, and say how to resume.
 
 ## Loop
 
@@ -37,7 +47,7 @@ python -m gdkit.skill_api next --project .gdkit/project.yaml --mode <mode>
 ```
 
 It prints one JSON object:
-- `done: false` with `id`, `ask`, `why`, `type`, `values`, `required`: a question to ask;
+- `done: false` with `id`, `ask`, `why`, `type`, `values`, `required`, `replaces_unset`: a question to ask;
 - `done: true` with `problems`: the interview is finished. Go to Finish.
 
 For each question:
@@ -47,10 +57,19 @@ For each question:
    python -m gdkit.skill_api set --project .gdkit/project.yaml --mode <mode> --id <id> --value-file <file>
    ```
    It prints `{"ok": true|false, "message": ...}`. On `false`, show the message and ask again. Do not force it.
-3. If the user answers blank, do not save anything. For a required question in registered mode, ask again. For an
-   optional question, move on.
+3. If the user answers blank: in explore mode, run `set` with an empty value file. That records the skip under
+   `skipped_in_explore`, and `next` moves on. In registered mode, save nothing. Ask again for a required question, and
+   move on for an optional one.
 4. Use UNSET only in explore mode, or for a question that is not required in registered mode. Registered mode refuses
    UNSET for required questions.
+5. To change an answer the user explicitly asked to change (rule 6):
+   ```bash
+   python -m gdkit.skill_api change --project .gdkit/project.yaml --mode <mode> --id <id> --value-file <file>
+   ```
+6. To declare a difference the freeze named, after the user confirms it, run the command the freeze printed:
+   ```bash
+   python -m gdkit.skill_api declare --project .gdkit/project.yaml --id <id> --list replaced_unset|changed_after_explore
+   ```
 
 ## Finish
 

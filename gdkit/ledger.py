@@ -46,7 +46,14 @@ def verify(path: str | os.PathLike[str]) -> int:
         for line_no, line in enumerate(handle, start=1):
             if not line.strip():
                 continue
-            entry = json.loads(line)
+            try:
+                entry = json.loads(line)
+            except ValueError as exc:
+                # A crash during a write can leave a half-written last line. It is reported, never repaired:
+                # whether to drop it is the owner's decision.
+                raise LedgerError(f"line {line_no}: not valid JSON ({exc.msg}); the file may have been cut off") from exc
+            if not isinstance(entry, dict):
+                raise LedgerError(f"line {line_no}: not a JSON object")
             if entry.get("seq") != count:
                 raise LedgerError(f"line {line_no}: seq {entry.get('seq')} expected {count}")
             if entry.get("prev_hash") != prev:
@@ -72,6 +79,23 @@ class Ledger:
             self._seq, self._prev = self._tail()
         else:
             self._seq, self._prev = 0, GENESIS
+        self._size = self._disk_size()
+
+    def _disk_size(self) -> int:
+        return self.path.stat().st_size if self.path.exists() else 0
+
+    def ensure_current(self) -> None:
+        """Raise LedgerError if another writer appended to the file since this object last wrote or read it."""
+        if self._disk_size() != self._size:
+            raise LedgerError(
+                f"{self.path} changed on disk since this Ledger last wrote it (another writer?); "
+                "reopen the ledger instead of appending from a stale view"
+            )
+
+    @property
+    def next_seq(self) -> int:
+        """The ``seq`` the next recorded entry will get."""
+        return self._seq
 
     def _tail(self) -> tuple[int, str]:
         last = None
@@ -93,7 +117,13 @@ class Ledger:
         output_hash: str | None = None,
         boundary: bool = False,
     ) -> dict[str, Any]:
-        """Append one entry, enforcing the mode rules. Returns the stored entry."""
+        """Append one entry, enforcing the mode rules. Returns the stored entry.
+
+        Raises LedgerError if the file's size differs from what this object last wrote or read, which means
+        another writer appended to it. That is detection, not a lock: two writers racing in the same instant
+        can still both pass the check.
+        """
+        self.ensure_current()
         has_hashes = input_hash is not None or output_hash is not None
         both_hashes = input_hash is not None and output_hash is not None
         if self.mode == "registered":
@@ -126,6 +156,7 @@ class Ledger:
             handle.write(line + "\n")
             handle.flush()
             os.fsync(handle.fileno())
+        self._size = self._disk_size()
         self._seq += 1
         self._prev = entry["entry_hash"]
         return entry

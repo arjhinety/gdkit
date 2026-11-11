@@ -27,9 +27,17 @@ def test_next_skips_questions_already_answered():
 
 
 def test_next_reports_done_with_problems_when_everything_is_answered():
-    result = next_question(QUESTIONS, {q["id"]: UNSET for q in QUESTIONS["questions"]}, "registered")
+    answers = {q["id"]: "x" for q in QUESTIONS["questions"]}
+    result = next_question(QUESTIONS, answers, "registered")
     assert result["done"] is True
-    assert result["problems"]  # UNSET is refused in registered mode for required questions
+    assert result["problems"]  # "x" is not a valid answer for every question type
+
+
+def test_next_in_registered_mode_reopens_a_required_unset_and_says_so():
+    result = next_question(QUESTIONS, {q["id"]: UNSET for q in QUESTIONS["questions"]}, "registered")
+    assert result["done"] is False and result["required"] is True
+    assert result["replaces_unset"] is True
+    assert next_question(QUESTIONS, {q["id"]: UNSET for q in QUESTIONS["questions"]}, "explore")["done"] is True
 
 
 def test_set_saves_a_valid_answer(tmp_path):
@@ -121,3 +129,49 @@ def test_set_reads_the_answer_from_a_file_with_punctuation(tmp_path):
     assert result.returncode == 0, result.stdout
     saved = yaml.safe_load(project.read_text(encoding="utf-8"))
     assert saved["study_question"] == 'Does "refusal" stay under 5%? It\'s $1 & more; yes'
+
+
+def test_explore_unset_answers_are_asked_again_in_registered_mode(tmp_path):
+    project = tmp_path / "project.yaml"
+    project.write_text(yaml.safe_dump({"study_question": UNSET, "baseline": "parent at 0.70"}), encoding="utf-8")
+    answers = yaml.safe_load(project.read_text(encoding="utf-8"))
+    assert next_question(QUESTIONS, answers, "registered")["id"] == "study_question"
+    ok, message = set_answer(QUESTIONS, project, "registered", "study_question", "Is it better?")
+    assert ok, message
+    assert yaml.safe_load(project.read_text(encoding="utf-8"))["study_question"] == "Is it better?"
+    # A real answer is still frozen.
+    ok, message = set_answer(QUESTIONS, project, "registered", "baseline", "something else")
+    assert not ok and "already answered" in message
+
+
+def test_explore_mode_keeps_unset_answers(tmp_path):
+    project = tmp_path / "project.yaml"
+    project.write_text(yaml.safe_dump({"study_question": UNSET}), encoding="utf-8")
+    assert next_question(QUESTIONS, {"study_question": UNSET}, "explore")["id"] != "study_question"
+    ok, message = set_answer(QUESTIONS, project, "explore", "study_question", "Is it better?")
+    assert not ok and "already answered" in message
+
+
+def test_unset_on_an_optional_question_is_not_asked_again_in_registered_mode():
+    answers = {"needs_paper_lookup": UNSET}
+    assert next_question(QUESTIONS, answers, "registered")["id"] != "needs_paper_lookup"
+
+
+def test_replacing_an_explore_unset_is_recorded(tmp_path):
+    from gdkit.interview import REPLACED_UNSET_KEY, validate
+
+    project = tmp_path / "project.yaml"
+    project.write_text(yaml.safe_dump({"study_question": UNSET, "baseline": UNSET}), encoding="utf-8")
+    set_answer(QUESTIONS, project, "registered", "baseline", "parent at 0.70")
+    set_answer(QUESTIONS, project, "registered", "study_question", "Is it better?")
+    saved = yaml.safe_load(project.read_text(encoding="utf-8"))
+    assert saved[REPLACED_UNSET_KEY] == ["baseline", "study_question"]
+    assert not any(p.startswith(REPLACED_UNSET_KEY) for p in validate(saved, QUESTIONS, "registered"))
+
+
+def test_a_first_answer_is_not_recorded_as_a_replacement(tmp_path):
+    from gdkit.interview import REPLACED_UNSET_KEY
+
+    project = tmp_path / "project.yaml"
+    set_answer(QUESTIONS, project, "registered", "baseline", "parent at 0.70")
+    assert REPLACED_UNSET_KEY not in yaml.safe_load(project.read_text(encoding="utf-8"))

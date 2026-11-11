@@ -120,7 +120,10 @@ def test_no_default_is_written_for_a_skipped_question(tmp_path):
     project = tmp_path / "project.yaml"
     script = [""] * len(QUESTIONS["questions"])  # blank everything, explore mode skips it
     run_interview(QUESTIONS_PATH, project, "explore", ask=scripted(script), out=lambda _: None)
-    assert not project.exists() or yaml.safe_load(project.read_text(encoding="utf-8")) in (None, {})
+    saved = yaml.safe_load(project.read_text(encoding="utf-8"))
+    # Only the record of the skips is written; no question gets a value.
+    assert set(saved) == {"skipped_in_explore"}
+    assert saved["skipped_in_explore"] == [q["id"] for q in QUESTIONS["questions"]]
 
 
 def test_yes_to_paper_lookup_without_pwc_prints_the_install_note(tmp_path):
@@ -134,3 +137,46 @@ def test_yes_to_paper_lookup_without_pwc_prints_the_install_note(tmp_path):
                   which=lambda name: None)
     assert any("pwc is not on PATH" in line for line in out)
     assert yaml.safe_load(project.read_text(encoding="utf-8"))["needs_paper_lookup"] is True
+
+
+def test_registered_rerun_asks_again_for_required_answers_left_unset_in_explore(tmp_path):
+    project = tmp_path / "project.yaml"
+    explore = [UNSET] * len(QUESTIONS["questions"])
+    run_interview(QUESTIONS_PATH, project, "explore", ask=scripted(explore), out=lambda _: None)
+    unset_required = [q["id"] for q in QUESTIONS["questions"] if "registered" in q.get("required_for", [])]
+    script = [reply for q, reply in zip(QUESTIONS["questions"], registered_script()) if q["id"] in unset_required]
+    problems = run_interview(QUESTIONS_PATH, project, "registered", ask=scripted(script), out=lambda _: None)
+    assert problems == []
+
+
+@pytest.mark.parametrize("text", ["nan", "inf", "-inf", "NaN"])
+def test_a_non_finite_number_is_refused(text):
+    status, _, _ = parse_answer(BY_ID["refusal_threshold"], text, "registered")
+    assert status == "error"
+
+
+def test_a_whole_number_is_saved_as_an_integer():
+    assert parse_answer(BY_ID["refusal_threshold"], "42", "registered") == ("set", 42, "")
+    assert parse_answer(BY_ID["refusal_threshold"], "9" * 400, "registered")[0] == "set"  # no OverflowError
+    status, value, _ = parse_answer(BY_ID["refusal_threshold"], "0.05", "registered")
+    assert (status, value) == ("set", 0.05)
+
+
+def test_the_clinic_records_which_answers_replaced_an_explore_unset(tmp_path):
+    from gdkit.interview import REPLACED_UNSET_KEY
+
+    project = tmp_path / "project.yaml"
+    explore = [UNSET] * len(QUESTIONS["questions"])
+    run_interview(QUESTIONS_PATH, project, "explore", ask=scripted(explore), out=lambda _: None)
+    unset_required = [q["id"] for q in QUESTIONS["questions"] if "registered" in q.get("required_for", [])]
+    script = [reply for q, reply in zip(QUESTIONS["questions"], registered_script()) if q["id"] in unset_required]
+    run_interview(QUESTIONS_PATH, project, "registered", ask=scripted(script), out=lambda _: None)
+    assert yaml.safe_load(project.read_text(encoding="utf-8"))[REPLACED_UNSET_KEY] == unset_required
+
+
+def test_a_fresh_registered_interview_records_no_replacements(tmp_path):
+    from gdkit.interview import REPLACED_UNSET_KEY
+
+    project = tmp_path / "project.yaml"
+    run_interview(QUESTIONS_PATH, project, "registered", ask=scripted(registered_script()), out=lambda _: None)
+    assert REPLACED_UNSET_KEY not in yaml.safe_load(project.read_text(encoding="utf-8"))

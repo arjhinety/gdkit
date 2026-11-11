@@ -4,11 +4,12 @@ A card is a JSON document. Every value comes from the ledger, the run's receipts
 ``model_setup.json``. Nothing is typed in by hand. ``audit_card`` regenerates a card from the run and
 compares it with the file, so a hand edit or a card built from an older ledger shows up as a mismatch.
 
-Dataset counts follow these ledger conventions (op names are the contract):
-* the first entry's ``rows_after`` is the raw row count;
+Dataset counts follow these ledger conventions (op names are the contract). Paper lookups and the
+preregistration entry are not data entries and are left out:
+* the first data entry's ``rows_after`` is the raw row count;
 * ``validate`` entries remove rejected rows: their ``rows_before - rows_after`` is the rejected count;
 * ``dedup`` entries remove duplicates: their ``rows_before - rows_after`` is the deduplicated count;
-* the last entry's ``rows_after`` is the final row count;
+* the last data entry's ``rows_after`` is the final row count;
 * valid rows are raw minus rejected.
 """
 
@@ -20,6 +21,7 @@ from typing import Any
 
 from gdkit.gates import RECEIPTS_DIR
 from gdkit.ledger import verify
+from gdkit.prereg import PREREG_OP
 from gdkit.pwc_lookup import LOOKUP_OP
 
 MODEL_SETUP_FILE = "model_setup.json"
@@ -53,7 +55,7 @@ def _head(entries: list[dict[str, Any]]) -> str:
 def dataset_card(run_dir: str | Path) -> dict[str, Any]:
     run_dir = Path(run_dir)
     entries = _entries(run_dir)
-    data_entries = [e for e in entries if e["op"] != LOOKUP_OP]
+    data_entries = [e for e in entries if e["op"] not in (LOOKUP_OP, PREREG_OP)]
     if not data_entries:
         raise CardError("the ledger has no data entries")
     raw = data_entries[0]["rows_after"]
@@ -97,6 +99,13 @@ def model_card(run_dir: str | Path) -> dict[str, Any]:
             receipts[receipt["gate"]] = receipt["receipt_hash"]
 
     lookups = [e["params"] for e in entries if e["op"] == LOOKUP_OP]
+    # Questions answered only after an explore run, as frozen in the preregistration entry. None means the
+    # run has no preregistration entry, which is different from an empty list.
+    prereg = entries[0]["params"] if entries[0]["op"] == PREREG_OP else None
+    replaced = prereg.get("replaced_unset", []) if prereg is not None else None
+    changed = prereg.get("changed_after_explore", []) if prereg is not None else None
+    checked = prereg.get("explore_runs_checked") if prereg is not None else None
+    searched = prereg.get("explore_runs_dir") if prereg is not None else None
     return {
         "card": "model",
         "run_id": entries[0]["run_id"],
@@ -107,6 +116,10 @@ def model_card(run_dir: str | Path) -> dict[str, Any]:
         "gate_receipts": receipts,
         "paper_lookups_ok": sum(1 for p in lookups if p.get("status") == "OK"),
         "paper_lookups_unavailable": sum(1 for p in lookups if p.get("status") == "UNAVAILABLE"),
+        "preregistration_replaced_unset": replaced,
+        "preregistration_changed_after_explore": changed,
+        "preregistration_explore_runs_checked": checked,
+        "preregistration_explore_runs_dir": searched,
     }
 
 

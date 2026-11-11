@@ -123,3 +123,30 @@ def test_doctor_exit_status(tmp_path):
                              capture_output=True, text=True, env=env)
     assert refused.returncode == 1
     assert "primary_metric" in refused.stdout
+
+
+@pytest.mark.parametrize("bad_value", [float("nan"), float("inf")])
+def test_a_non_finite_number_in_the_file_is_refused(bad_value):
+    answers = complete_registered()
+    answers["refusal_threshold"] = bad_value
+    problems = validate(answers, QUESTIONS, "registered")
+    assert any(p.startswith("refusal_threshold:") and "finite" in p for p in problems), problems
+
+
+def test_replaced_unset_must_name_questions():
+    from gdkit.interview import REPLACED_UNSET_KEY
+
+    answers = complete_registered()
+    answers[REPLACED_UNSET_KEY] = ["baseline"]
+    assert validate(answers, QUESTIONS, "registered") == []
+    answers[REPLACED_UNSET_KEY] = ["basline"]
+    assert any(p.startswith(REPLACED_UNSET_KEY) for p in validate(answers, QUESTIONS, "registered"))
+    answers[REPLACED_UNSET_KEY] = "baseline"
+    assert any(p.startswith(REPLACED_UNSET_KEY) for p in validate(answers, QUESTIONS, "registered"))
+
+
+def test_a_question_may_not_use_the_reserved_id():
+    from gdkit.interview import REPLACED_UNSET_KEY
+
+    data = {"questions": [{"id": REPLACED_UNSET_KEY, "type": "text", "ask": "x"}]}
+    assert any("reserved" in p for p in check_questions(data))

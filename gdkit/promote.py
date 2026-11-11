@@ -6,6 +6,7 @@ Checks, in order, for each required gate:
 3. Its ``ledger_head`` is the run's current ledger head (catches receipts from before a later change).
 4. Its gate name and cheap flag match the registry, and its ``gate_code_hash`` matches the current gate.
 5. Every input file it names still has the recorded sha256 (catches altered artifacts).
+   Then its result must say ``passed: true`` (a receipt of a failed check is refused).
 6. Cheap gates are re-run and must reproduce the receipt's result.
    Expensive gates are not re-run. They need an attestation that the caller's verifier accepts.
 
@@ -26,7 +27,7 @@ from gdkit.prereg import check_answers
 from gdkit.pwc_lookup import LOOKUP_OP
 from gdkit.stream_hash import canonical_json_bytes
 
-Attestation = Callable[[str, str], bool]  # (run_id, receipt_hash) -> bool
+Attestation = Callable[[str, str, str], bool]  # (run_id, gate name, receipt_hash) -> bool
 
 
 class PromoteError(Exception):
@@ -72,7 +73,7 @@ def _require_frozen(state: dict, project_path: str | Path) -> None:
 
 
 def _check_receipt(run_dir: Path, name: str, gate: Gate, state: dict[str, str]) -> dict[str, Any]:
-    """Checks 1 to 5 from the module docstring. Returns the receipt if they all pass."""
+    """Checks 1 to 5 from the module docstring, and the pass flag. Returns the receipt if they all pass."""
     path = run_dir / RECEIPTS_DIR / f"{name}.json"
     if not path.exists():
         raise PromoteError(f"{name}: no receipt")
@@ -93,6 +94,10 @@ def _check_receipt(run_dir: Path, name: str, gate: Gate, state: dict[str, str]) 
         artifact = run_dir / rel
         if not artifact.exists() or _sha256(artifact) != digest:
             raise PromoteError(f"{name}: input {rel} has changed since the receipt was written")
+
+    result = receipt.get("result")
+    if not isinstance(result, dict) or result.get("passed") is not True:
+        raise PromoteError(f"{name}: the gate did not pass (its receipt's result is {result!r})")
     return receipt
 
 
@@ -123,14 +128,14 @@ def promote(
                 raise PromoteError(f"{name}: re-running the cheap gate does not reproduce the receipt's result")
             report[name] = "re-run and matched"
         else:
-            if attestation is None or not attestation(state["run_id"], receipt["receipt_hash"]):
+            if attestation is None or not attestation(state["run_id"], name, receipt["receipt_hash"]):
                 raise PromoteError(f"{name}: expensive gate has no valid attestation")
             report[name] = "attested"
     return {"run_id": state["run_id"], "ledger_head": state["head"], "gates": report}
 
 
 def attestable_hash(run_dir: str | Path, name: str, registry: dict[str, Gate], *, project_path: str | Path) -> str:
-    """Checks 1 to 5 for one expensive gate, then its receipt hash, for the attestation tag.
+    """Checks 1 to 5 and the pass flag for one expensive gate, then its receipt hash, for the attestation tag.
 
     This does not check the attestation itself, and it does not re-run the gate. The CI job
     that calls it is the only place a signing key is available.
@@ -148,18 +153,18 @@ def attestable_hash(run_dir: str | Path, name: str, registry: dict[str, Gate], *
 
 
 def git_attestation(repo: str | Path, allowed_signers: str | Path) -> Attestation:
-    """Attestation via an SSH-signed git tag ``attest/<run_id>``.
+    """Attestation via an SSH-signed git tag ``attest/<run_id>/<gate>``, one tag per expensive gate.
 
     The tag must verify against ``allowed_signers`` (an OpenSSH allowed-signers file). Its message
-    must hold the receipt hash, and the tagged commit must contain the run's ledger at
+    must be exactly the receipt hash, and the tagged commit must contain the run's ledger at
     ``runs/<run_id>/ledger.jsonl``. That ties the attestation to a committed run, not to a
     loose file on a laptop.
     """
     repo = str(repo)
     signers = str(allowed_signers)
 
-    def verify_attestation(run_id: str, digest: str) -> bool:
-        tag = f"attest/{run_id}"
+    def verify_attestation(run_id: str, gate: str, digest: str) -> bool:
+        tag = f"attest/{run_id}/{gate}"
         check = subprocess.run(
             ["git", "-C", repo, "-c", "gpg.format=ssh", "-c", f"gpg.ssh.allowedSignersFile={signers}", "tag", "-v", tag],
             capture_output=True,
@@ -168,11 +173,11 @@ def git_attestation(repo: str | Path, allowed_signers: str | Path) -> Attestatio
         if check.returncode != 0:
             return False
         message = subprocess.run(
-            ["git", "-C", repo, "tag", "-l", "--format=%(contents)", tag],
+            ["git", "-C", repo, "tag", "-l", "--format=%(contents:subject)", tag],
             capture_output=True,
             text=True,
         ).stdout
-        if digest not in message:
+        if message.strip() != digest:
             return False
         commit = subprocess.run(
             ["git", "-C", repo, "rev-list", "-n", "1", tag], capture_output=True, text=True

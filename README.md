@@ -14,11 +14,19 @@ vendored under `vendor/` (see NOTICE and SOURCE.lock).
 - **Modes.** `explore` allows unset answers and records content hashes only at boundaries. `registered` needs content
   hashes on every entry and no unset required answers.
 - **Gate receipts.** `run_gate` writes an unsigned receipt bound to the run id, the ledger head, the gate's source hash and
-  the input file hashes.
-- **Promotion.** `promote()` checks each required receipt, re-runs cheap gates, and requires an SSH-signed attestation for
-  expensive ones. It refuses explore runs.
+  the input file hashes. A gate's check must return a dict with a boolean `passed` field, for example
+  `{"passed": True, "rows": 3}`. Any other result is refused and no receipt is written. Gate names may use only letters,
+  digits, `_` and `-`.
+- **Promotion.** `promote()` checks each required receipt, refuses any whose result is not `passed: true`, re-runs cheap
+  gates, and requires an SSH-signed attestation for expensive ones. Each expensive gate has its own tag,
+  `attest/<run_id>/<gate>`, whose message is exactly the receipt hash. It refuses explore runs.
 - **Pre-registration.** The first ledger entry of a registered run holds the study's answers. `promote` and `attest` refuse
   a run whose answers differ from that frozen copy, and they name the changed answer.
+- **Answers given after an explore run.** An answer given after an explore run may have been chosen after seeing the
+  data, so it must be declared. A question left `UNSET` or skipped in explore mode and answered later is listed under
+  `replaced_unset`. A real answer can only be changed with `skill_api change`, which lists it under
+  `changed_after_explore`. A registered freeze compares the answers with every explore-mode freeze in the same runs
+  directory and refuses any undeclared difference. Declared ones are frozen with the run and shown on the model card.
 - **Paper lookups.** Papers With Code lookups go through the `pwc` command. Each lookup is recorded. A failed lookup is
   recorded as UNAVAILABLE and blocks promotion until a later lookup for the same request succeeds.
 - **Cards.** Dataset and model cards are generated from the ledger, and `audit_card` checks a card against it.
@@ -52,9 +60,14 @@ Checks the project answers against the interview. Exit 0 when they are acceptabl
 ```
 python -m gdkit.skill_api next --project .gdkit/project.yaml --questions interview/questions.yaml --mode registered
 python -m gdkit.skill_api set  --project .gdkit/project.yaml --questions interview/questions.yaml --mode registered --id QID --value-file FILE
+python -m gdkit.skill_api change --project .gdkit/project.yaml --questions interview/questions.yaml --mode registered --id QID --value-file FILE
+python -m gdkit.skill_api declare --project .gdkit/project.yaml --questions interview/questions.yaml --id QID --list replaced_unset
 ```
 
-The non-interactive backend the skill uses. Each prints one JSON object.
+The non-interactive backend the skill uses. Each prints one JSON object. `change` replaces a real answer and declares
+it under `changed_after_explore`. `declare` adds a question to `replaced_unset` or `changed_after_explore` without
+changing its answer. Use it for a question never asked during an earlier explore run, or an answer dropped since then.
+The registered freeze prints the exact command for each difference it refuses.
 
 ```
 python -m gdkit.cli --registry package.module:REGISTRY attest RUN_DIR GATE --project .gdkit/project.yaml
@@ -77,6 +90,13 @@ Copy `skills/overfit-clinic/` into `~/.claude/skills/`, then run `/overfit-clini
 - An attestation shows that the owner approved a committed receipt. It does not show that the expensive job ran.
 - The interview checks answer structure, not meaning. A vague study question passes validation.
 - The attestation workflow has not run on GitHub yet.
+- A gate's code hash covers only its check function. A change to a helper the check calls does not mark old receipts
+  as stale.
+- The ledger refuses to append when the file changed since its last write, so a second writer is detected. This is not
+  a lock: two writers in the same instant can both pass the check.
+- The explore cross-check only sees explore runs that froze their answers and whose ledgers are still in the runs
+  directory. Without one, the declaration lists live only in `.gdkit/project.yaml` before the freeze, where deleting
+  them hides them. See the explore-mode item in `ROADMAP.md`.
 - The same user can still bypass some checks. See `ROADMAP.md`.
 
 See `ROADMAP.md` for status and planned work.

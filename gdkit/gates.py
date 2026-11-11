@@ -4,6 +4,12 @@ A receipt is a JSON file written by ``run_gate``, the only function in gdkit tha
 Each receipt binds the gate's name, its code hash, the run ID, the ledger head at the time of the
 check, and the sha256 of every input file the gate read. ``promote`` checks all of these again.
 
+A gate's check returns a JSON object with a boolean ``passed`` field, for example
+``{"passed": True, "rows": 3}``. ``run_gate`` refuses any other result and writes no receipt. A result with
+``passed: False`` is still written, as the record of a failed check, and ``promote`` refuses it.
+
+Gate names may use only letters, digits, ``_`` and ``-``, because they become file names and git tag names.
+
 Receipts are unsigned. Their ``receipt_hash`` is a sha256 of the body, so an accidental edit is
 caught. It does not stop someone who recomputes the hash. The promote step is what refuses forgery.
 """
@@ -13,6 +19,7 @@ from __future__ import annotations
 import hashlib
 import inspect
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -20,6 +27,17 @@ from typing import Any, Callable
 from gdkit.stream_hash import canonical_json_bytes
 
 RECEIPTS_DIR = "receipts"
+_NAME = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+class GateError(ValueError):
+    """A gate is misdefined: an unsafe name, or a check that returned no boolean ``passed`` field."""
+
+
+def check_result(name: str, result: Any) -> None:
+    """Raise GateError unless ``result`` is a dict whose ``passed`` field is a bool."""
+    if not isinstance(result, dict) or not isinstance(result.get("passed"), bool):
+        raise GateError(f"{name}: a gate check must return a dict with a boolean 'passed' field, got {result!r}")
 
 
 @dataclass(frozen=True)
@@ -29,6 +47,10 @@ class Gate:
     name: str
     cheap: bool
     check: Callable[[Path], Any]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.name, str) or not _NAME.fullmatch(self.name):
+            raise GateError(f"gate name {self.name!r} may use only letters, digits, '_' and '-'")
 
     @property
     def code_hash(self) -> str:
@@ -61,6 +83,7 @@ def run_gate(
     run_dir = Path(run_dir)
     input_hashes = {rel: sha256_path(run_dir / rel) for rel in inputs}
     result = gate.check(run_dir)
+    check_result(gate.name, result)
     body = {
         "run_id": run_id,
         "gate": gate.name,

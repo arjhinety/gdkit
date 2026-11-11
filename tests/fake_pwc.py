@@ -5,6 +5,8 @@ Behaviour is chosen by the first argument:
   search ...        -> a search response shaped like the live one (schema v1)
   fail ...          -> exit status 2 with a message on stderr
   garbage ...       -> a response that is not JSON
+  jsonlist ...      -> valid JSON that is a list, not an object
+  badresults ...    -> an object whose results are not a list of objects
 """
 
 import json
@@ -55,6 +57,10 @@ elif mode == "flaky":
             open(marker, "w").close()
         print("temporary outage", file=sys.stderr)
         sys.exit(2)
+elif mode == "jsonlist":
+    print("[1, 2]")
+elif mode == "badresults":
+    print(json.dumps({"schema_version": "v1", "data": {"results": [1, "two"]}}))
 elif mode == "garbage":
     print("<html>not json</html>")
 else:

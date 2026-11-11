@@ -14,7 +14,7 @@ from gdkit.pwc_lookup import lookup
 FAKE = [sys.executable, str(Path(__file__).parent / "fake_pwc.py")]
 RUN_ID = "run-1"
 REQUIRED = ["row_count", "train"]
-ACCEPT = lambda run_id, digest: True  # noqa: E731
+ACCEPT = lambda run_id, gate, digest: True  # noqa: E731
 
 
 def _sha(path):

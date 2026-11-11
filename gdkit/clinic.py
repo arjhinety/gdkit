@@ -6,8 +6,12 @@ Behaviour:
 * questions are asked in file order, one at a time;
 * each answer is checked with the same rules as ``gdkit doctor`` and asked again until it passes;
 * the project file is rewritten after every answer, so an interrupted run resumes where it stopped;
-* a question already answered in the file is not asked again;
-* nothing is filled in by default. A blank answer is a skip (explore) or a refusal (registered);
+* a question already answered in the file is not asked again, except that a required question left
+  ``UNSET`` in explore mode is asked again in registered mode. The answer that replaces it is listed under
+  ``replaced_unset`` in the file, because it may have been chosen after the explore run saw the data;
+* nothing is filled in by default. A blank answer is a skip (explore) or a refusal (registered). An explore
+  skip is listed under ``skipped_in_explore`` and is not asked again in explore mode; a later answer to it
+  joins ``replaced_unset``;
 * ``UNSET`` is accepted in explore mode, and for questions that are not required in registered mode;
 * a yes to ``needs_paper_lookup`` checks whether ``pwc`` is on PATH and says what to do if it is not.
 """
@@ -24,7 +28,18 @@ from typing import Any, Callable
 
 import yaml
 
-from gdkit.interview import UNSET, MODES, InterviewError, _check_value, load_questions, validate
+from gdkit.interview import (
+    MODES,
+    UNSET,
+    InterviewError,
+    _check_value,
+    is_open,
+    load_questions,
+    record_answer,
+    record_skip,
+    validate,
+    was_undecided_in_explore,
+)
 
 PWC_INSTALL_NOTE = (
     "pwc is not on PATH. Install the Papers With Code CLI from the pwc project's instructions, "
@@ -71,9 +86,12 @@ def parse_answer(question: dict, raw: str, mode: str) -> tuple[str, Any, str]:
         value: Any = text
     elif kind == "number":
         try:
-            value = float(text)
+            value = int(text)
         except ValueError:
-            return "error", None, "type a number, for example 0.05"
+            try:
+                value = float(text)
+            except ValueError:
+                return "error", None, "type a number, for example 0.05"
     elif kind == "enum":
         if text not in question["values"]:
             return "error", None, f"choose one of: {', '.join(question['values'])}"
@@ -117,11 +135,13 @@ def run_interview(
 
     for question in questions_data["questions"]:
         qid = question["id"]
-        if qid in answers:
+        if not is_open(question, answers, mode):
             continue
         required = mode in question.get("required_for", [])
         out("")
         out(f"[{qid}] {question['ask']}")
+        if was_undecided_in_explore(answers, qid):
+            out("  this was left undecided in explore mode; the answer you give now is recorded under replaced_unset")
         if question.get("why"):
             out(f"  why: {question['why']}")
         while True:
@@ -130,8 +150,11 @@ def run_interview(
                 out(f"  {message}")
                 continue
             if status == "skip":
+                if mode == "explore":
+                    record_skip(answers, qid)
+                    _write_answers(project, answers)
                 break
-            answers[qid] = value
+            record_answer(answers, qid, value)
             _write_answers(project, answers)
             if qid == "needs_paper_lookup" and value is True and which("pwc") is None:
                 out(f"  {PWC_INSTALL_NOTE}")

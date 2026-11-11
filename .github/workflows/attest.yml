@@ -5,11 +5,18 @@
 # restrict it to the main branch, and store the SSH signing private key as the environment secret
 # ATTEST_SIGNING_KEY. The public key goes into .gdkit/allowed_signers in the repo.
 #
-# What this proves: the receipt hash was committed, its inputs match, and the owner approved this
-# run in the environment. It does not prove the expensive job ran. That is what the reviewer checks.
+# What this proves: the receipt hash was committed, its inputs match, its result says passed, and the
+# owner approved this run in the environment. It does not prove the expensive job ran. That is what the
+# reviewer checks.
 #
-# Token use: the default GITHUB_TOKEN is given to the push step only. Checkout does not persist it,
-# so repository code (pip install, the gate registry) never sees it.
+# Two jobs, so repository code never runs where the key is:
+# * "validate" installs gdkit and imports the gate registry (repository code). It has no environment,
+#   no secret and a read-only token, and it only outputs the receipt hash.
+# * "sign" has the environment and the key. It checks out the same commit, runs no repository code
+#   (no pip install, no python), re-checks the hash format, signs the tag and pushes it.
+# A step in one job cannot change the PATH, environment or files of another job, which is the point.
+#
+# One tag per expensive gate: attest/<run_id>/<gate>. Its message is exactly the receipt hash.
 name: attest
 
 on:
@@ -32,12 +39,13 @@ permissions:
   contents: read
 
 jobs:
-  attest:
+  validate:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    environment: attestation
     permissions:
-      contents: write
+      contents: read
+    outputs:
+      digest: ${{ steps.receipt.outputs.digest }}
     env:
       RUN_ID: ${{ inputs.run_id }}
       GATE: ${{ inputs.gate }}
@@ -45,12 +53,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          ref: ${{ github.sha }}
           persist-credentials: false
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      - name: Check the inputs
+        run: |
+          set -euo pipefail
+          case "$RUN_ID" in
+            ""|*[!A-Za-z0-9_-]*) echo "refused: run_id may use only letters, digits, '_' and '-'" >&2; exit 1 ;;
+          esac
+          case "$GATE" in
+            ""|*[!A-Za-z0-9_-]*) echo "refused: gate may use only letters, digits, '_' and '-'" >&2; exit 1 ;;
+          esac
 
       - name: Install gdkit
         run: pip install -e .
@@ -59,9 +77,6 @@ jobs:
         id: receipt
         run: |
           set -euo pipefail
-          case "$RUN_ID" in
-            ""|*[!A-Za-z0-9_-]*) echo "refused: run_id may use only letters, digits, '_' and '-'" >&2; exit 1 ;;
-          esac
           DIGEST="$(python -m gdkit.cli --registry "$REGISTRY" attest "runs/$RUN_ID" "$GATE" --project .gdkit/project.yaml)"
           if ! printf '%s' "$DIGEST" | grep -Eq '^[0-9a-f]{64}$'; then
             echo "refused: the receipt hash is not a sha256 hex string" >&2
@@ -69,10 +84,42 @@ jobs:
           fi
           echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
 
+  sign:
+    needs: validate
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: attestation
+    permissions:
+      contents: write
+    env:
+      RUN_ID: ${{ inputs.run_id }}
+      GATE: ${{ inputs.gate }}
+      DIGEST: ${{ needs.validate.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Re-check the inputs and the hash
+        run: |
+          set -euo pipefail
+          case "$RUN_ID" in
+            ""|*[!A-Za-z0-9_-]*) echo "refused: bad run_id" >&2; exit 1 ;;
+          esac
+          case "$GATE" in
+            ""|*[!A-Za-z0-9_-]*) echo "refused: bad gate" >&2; exit 1 ;;
+          esac
+          if ! printf '%s' "$DIGEST" | grep -Eq '^[0-9a-f]{64}$'; then
+            echo "refused: the receipt hash is not a sha256 hex string" >&2
+            exit 1
+          fi
+          test -f "runs/$RUN_ID/ledger.jsonl" || { echo "refused: runs/$RUN_ID/ledger.jsonl is not committed" >&2; exit 1; }
+
       - name: Sign and push the attestation tag
         env:
           SIGNING_KEY: ${{ secrets.ATTEST_SIGNING_KEY }}
-          DIGEST: ${{ steps.receipt.outputs.digest }}
           PUSH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
@@ -84,6 +131,6 @@ jobs:
           git config user.email "attest@gdkit.invalid"
           git config gpg.format ssh
           git config user.signingkey "$KEY_FILE"
-          git tag -s "attest/$RUN_ID" -m "$DIGEST"
+          git tag -s "attest/$RUN_ID/$GATE" -m "$DIGEST"
           AUTH="$(printf 'x-access-token:%s' "$PUSH_TOKEN" | base64 -w0)"
-          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $AUTH" push origin "refs/tags/attest/$RUN_ID"
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $AUTH" push origin "refs/tags/attest/$RUN_ID/$GATE"

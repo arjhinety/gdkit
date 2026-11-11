@@ -51,10 +51,16 @@ def _pwc_version(pwc_bin: list[str]) -> tuple[str | None, str | None]:
     return cli, api
 
 
-def _papers(payload: dict[str, Any]) -> list[dict[str, Any]]:
+def _papers(payload: Any) -> list[dict[str, Any]] | None:
+    """The papers in a response, or None when the response does not have the expected shape."""
+    if not isinstance(payload, dict):
+        return None
     data = payload.get("data", payload)
     if isinstance(data, dict) and "results" in data:
-        return list(data["results"])
+        results = data["results"]
+        if not isinstance(results, list) or not all(isinstance(item, dict) for item in results):
+            return None
+        return list(results)
     return [data] if isinstance(data, dict) else []
 
 
@@ -110,21 +116,27 @@ def lookup(
         payload = json.loads(raw)
     except ValueError:
         return unavailable("pwc returned a response that is not JSON", raw)
+    papers = _papers(payload)
+    if papers is None:
+        return unavailable("pwc returned JSON that is not the expected shape (an object with a list of results)", raw)
 
+    # The file is named by the ledger seq of the entry about to be written, which never repeats. If an earlier
+    # attempt crashed between this write and the ledger write, the same name is reused, and only that orphan
+    # file (which no ledger entry points to) is overwritten. The stale-writer check runs first, so a second
+    # Ledger object cannot overwrite a file that another writer's entry already points to.
+    ledger.ensure_current()
     lookups = run_dir / LOOKUPS_DIR
     lookups.mkdir(parents=True, exist_ok=True)
-    seq = len(list(lookups.glob("*.json"))) + 1
-    raw_path = lookups / f"{seq:04d}.json"
+    raw_path = lookups / f"{ledger.next_seq:06d}.json"
     raw_path.write_bytes(raw)
     response_hash = _sha256_bytes(raw)
 
-    papers = _papers(payload)
     params = {
         "status": "OK",
         "command": command,
         "pwc_version": pwc_version,
         "api_version": api_version,
-        "schema_version": payload.get("schema_version"),
+        "schema_version": payload.get("schema_version"),  # payload is a dict: _papers checked it
         "raw_response_path": raw_path.relative_to(run_dir).as_posix(),
         "papers": [{field: paper.get(field) for field in STABLE_FIELDS} for paper in papers],
         "volatile": {

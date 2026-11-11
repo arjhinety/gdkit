@@ -88,3 +88,30 @@ def test_file_hash_helper_matches_hashlib(tmp_path):
     sample = tmp_path / "raw.bin"
     sample.write_bytes(b"gdkit" * 10_000)
     assert sha256_file(sample) == hashlib.sha256(sample.read_bytes()).hexdigest()
+
+
+def test_a_half_written_last_line_is_a_ledger_error(tmp_path):
+    path = tmp_path / "ledger.jsonl"
+    ledger = Ledger(path, run_id="r", mode="explore")
+    ledger.record("load", rows_before=0, rows_after=1)
+    with open(path, "a", encoding="utf-8") as handle:
+        handle.write('{"run_id":"r","se')
+    with pytest.raises(LedgerError, match="line 2: not valid JSON"):
+        verify(path)
+
+
+def test_a_line_that_is_not_an_object_is_a_ledger_error(tmp_path):
+    path = tmp_path / "ledger.jsonl"
+    path.write_text("[1, 2]\n", encoding="utf-8")
+    with pytest.raises(LedgerError, match="line 1: not a JSON object"):
+        verify(path)
+
+
+def test_a_second_writer_on_the_same_file_is_detected(tmp_path):
+    path = tmp_path / "ledger.jsonl"
+    first = Ledger(path, run_id="r", mode="explore")
+    second = Ledger(path, run_id="r", mode="explore")
+    first.record("load", rows_before=0, rows_after=1)
+    with pytest.raises(LedgerError, match="changed on disk"):
+        second.record("filter", rows_before=1, rows_after=1)
+    assert verify(path) == 1  # the chain was not forked

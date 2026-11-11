@@ -3,6 +3,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 from gdkit.ledger import Ledger, verify
 from gdkit.pwc_lookup import lookup
 
@@ -82,3 +84,38 @@ def test_explore_mode_records_the_hashes_in_params_only(tmp_path):
     assert entry["input_hash"] is None and entry["output_hash"] is None
     assert entry["params"]["response_sha256"]
     assert verify(run / "ledger.jsonl") == 1
+
+
+@pytest.mark.parametrize("mode", ["jsonlist", "badresults"])
+def test_json_that_is_not_the_expected_shape_is_unavailable_and_recorded(tmp_path, mode):
+    run, ledger = _ledger(tmp_path)
+    params = lookup(ledger, run, [mode, "x"], pwc_bin=FAKE)
+    assert params["status"] == "UNAVAILABLE"
+    assert "shape" in params["reason"]
+    assert verify(run / "ledger.jsonl") == 1
+    assert not (run / "paper_lookups").exists()
+
+
+def test_a_stale_second_writer_does_not_overwrite_a_recorded_raw_file(tmp_path):
+    import pytest as _pytest
+
+    from gdkit.ledger import LedgerError
+
+    run, first = _ledger(tmp_path)
+    second = Ledger(run / "ledger.jsonl", run_id="run-1", mode="registered")
+    recorded = lookup(first, run, ["search", "a"], pwc_bin=FAKE)
+    before = (run / recorded["raw_response_path"]).read_bytes()
+    with _pytest.raises(LedgerError, match="changed on disk"):
+        lookup(second, run, ["search", "b"], pwc_bin=FAKE)
+    assert (run / recorded["raw_response_path"]).read_bytes() == before
+    assert len(list((run / "paper_lookups").iterdir())) == 1
+
+
+def test_raw_files_are_named_by_ledger_position_so_a_deleted_file_is_not_overwritten(tmp_path):
+    run, ledger = _ledger(tmp_path)
+    first = lookup(ledger, run, ["search", "a"], pwc_bin=FAKE)
+    second = lookup(ledger, run, ["search", "b"], pwc_bin=FAKE)
+    (run / first["raw_response_path"]).unlink()
+    third = lookup(ledger, run, ["search", "c"], pwc_bin=FAKE)
+    assert len({first["raw_response_path"], second["raw_response_path"], third["raw_response_path"]}) == 3
+    assert (run / second["raw_response_path"]).exists()

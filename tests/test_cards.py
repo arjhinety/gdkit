@@ -102,3 +102,35 @@ def test_card_built_from_an_older_ledger_is_stale(tmp_path):
     )
     stale = audit_card(card_path, dataset_card(run))
     assert "ledger_head" in stale and "final_rows" in stale
+
+
+def test_dataset_counts_skip_the_preregistration_entry(tmp_path):
+    """1000 loaded, 50 rejected: the card must say 1000 raw and 950 valid, not 0 and -50."""
+    from gdkit.prereg import freeze_run
+
+    run = tmp_path / "run"
+    run.mkdir()
+    project = tmp_path / "project.yaml"
+    project.write_text("study_question: q\n", encoding="utf-8")
+    ledger = Ledger(run / "ledger.jsonl", run_id="run-1", mode="registered")
+    freeze_run(ledger, project)
+    ledger.record("load", rows_before=0, rows_after=1000, input_hash=H, output_hash=H)
+    ledger.record("validate", rows_before=1000, rows_after=950, input_hash=H, output_hash=H)
+    card = dataset_card(run)
+    assert (card["raw_rows"], card["rejected_rows"], card["valid_rows"], card["final_rows"]) == (1000, 50, 950, 950)
+
+
+def test_the_model_card_shows_answers_that_replaced_an_explore_unset(tmp_path):
+    from gdkit.prereg import freeze_run
+
+    run = tmp_path / "run"
+    run.mkdir()
+    project = tmp_path / "project.yaml"
+    project.write_text("study_question: q\nreplaced_unset: [study_question]\n", encoding="utf-8")
+    freeze_run(Ledger(run / "ledger.jsonl", run_id="run-1", mode="registered"), project)
+    (run / "model_setup.json").write_text(json.dumps(SETUP), encoding="utf-8")
+    assert model_card(run)["preregistration_replaced_unset"] == ["study_question"]
+    # A run with no preregistration entry says so instead of claiming an empty list.
+    other = tmp_path / "other"
+    other.mkdir()
+    assert model_card(model_run(other))["preregistration_replaced_unset"] is None

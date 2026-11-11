@@ -17,8 +17,8 @@ RUN_ID = "run-1"
 from gates_fixture import COUNT, REGISTRY, TRAIN  # noqa: E402
 
 REQUIRED = ["row_count", "train"]
-ACCEPT = lambda run_id, digest: True  # noqa: E731
-REJECT = lambda run_id, digest: False  # noqa: E731
+ACCEPT = lambda run_id, gate, digest: True  # noqa: E731
+REJECT = lambda run_id, gate, digest: False  # noqa: E731
 
 
 def _sha(path):
@@ -69,7 +69,7 @@ def test_happy_path_is_accepted(tmp_path):
 def test_hand_written_receipt_is_refused(tmp_path):
     run = make_run(tmp_path)
     receipt_path(run, "row_count").write_text(
-        json.dumps({"run_id": RUN_ID, "gate": "row_count", "result": {"rows": 3}, "receipt_hash": "0" * 64}),
+        json.dumps({"run_id": RUN_ID, "gate": "row_count", "result": {"passed": True, "rows": 3}, "receipt_hash": "0" * 64}),
         encoding="utf-8",
     )
     with pytest.raises(PromoteError, match="does not match its body"):
@@ -78,7 +78,7 @@ def test_hand_written_receipt_is_refused(tmp_path):
 
 def test_forged_result_with_recomputed_hash_fails_the_rerun(tmp_path):
     run = make_run(tmp_path)
-    rewrite_receipt(run, "row_count", lambda body: body.update(result={"rows": 99}))
+    rewrite_receipt(run, "row_count", lambda body: body.update(result={"passed": True, "rows": 99}))
     with pytest.raises(PromoteError, match="does not reproduce"):
         promote(run, REGISTRY, REQUIRED, attestation=ACCEPT, project_path=proj(run))
 
@@ -185,8 +185,8 @@ def test_attestation_from_an_allowed_signer_is_accepted(tmp_path):
     owner = _keypair(tmp_path, "owner")
     signers = _allowed_signers(tmp_path / "allowed_signers", "owner@gdkit", Path(str(owner) + ".pub"))
     digest = "d" * 64
-    _git(repo, "tag", "-s", "attest/run-1", "-m", digest, key=owner)
-    assert git_attestation(repo, signers)("run-1", digest) is True
+    _git(repo, "tag", "-s", "attest/run-1/train", "-m", digest, key=owner)
+    assert git_attestation(repo, signers)("run-1", "train", digest) is True
 
 
 @needs_ssh
@@ -202,8 +202,8 @@ def test_attestation_from_a_key_not_in_allowed_signers_is_refused(tmp_path):
     intruder = _keypair(tmp_path, "intruder")
     signers = _allowed_signers(tmp_path / "allowed_signers", "owner@gdkit", Path(str(owner) + ".pub"))
     digest = "e" * 64
-    _git(repo, "tag", "-s", "attest/run-1", "-m", digest, key=intruder)
-    assert git_attestation(repo, signers)("run-1", digest) is False
+    _git(repo, "tag", "-s", "attest/run-1/train", "-m", digest, key=intruder)
+    assert git_attestation(repo, signers)("run-1", "train", digest) is False
 
 
 # --- attestable_hash and the CI-facing CLI ---------------------------------------------------
@@ -222,7 +222,7 @@ def test_attestable_hash_refuses_a_cheap_gate(tmp_path):
 
 def test_attestable_hash_refuses_a_forged_expensive_receipt(tmp_path):
     run = make_run(tmp_path)
-    rewrite_receipt(run, "train", lambda body: body.update(result={"loss": 0.0}))
+    rewrite_receipt(run, "train", lambda body: body.update(result={"passed": True, "loss": 0.0}))
     # The forged result is internally consistent, so the hash check passes. Attestation does not
     # re-run expensive gates, so this is exactly what the signature (not this function) must stop.
     assert attestable_hash(run, "train", REGISTRY, project_path=proj(run)) == load_receipt(run, "train")["receipt_hash"]
@@ -242,8 +242,8 @@ def test_tag_on_a_commit_without_the_run_is_refused(tmp_path):
     owner = _keypair(tmp_path, "owner")
     signers = _allowed_signers(tmp_path / "allowed_signers", "owner@gdkit", Path(str(owner) + ".pub"))
     digest = "f" * 64
-    _git(repo, "tag", "-s", "attest/run-1", "-m", digest, key=owner)
-    assert git_attestation(repo, signers)("run-1", digest) is False
+    _git(repo, "tag", "-s", "attest/run-1/train", "-m", digest, key=owner)
+    assert git_attestation(repo, signers)("run-1", "train", digest) is False
 
 
 def test_cli_attest_prints_the_hash_and_refuses_with_status_1(tmp_path):
@@ -263,3 +263,95 @@ def test_cli_attest_prints_the_hash_and_refuses_with_status_1(tmp_path):
     refused = subprocess.run(cmd + [str(run), "row_count"], capture_output=True, text=True, env=env, cwd=root)
     assert refused.returncode == 1
     assert "cheap gates" in refused.stderr
+
+
+# --- review fixes: gate pass flag, one attestation tag per gate --------------------------------
+
+
+def _failing_gate():
+    from gates_fixture import failing_leak_check
+
+    return Gate("leak_check", cheap=True, check=failing_leak_check)
+
+
+def _head(run):
+    return json.loads((run / "ledger.jsonl").read_text(encoding="utf-8").splitlines()[-1])["entry_hash"]
+
+
+def test_a_cheap_gate_that_reported_failure_is_refused(tmp_path):
+    run = make_run(tmp_path)
+    gate = _failing_gate()
+    run_gate(run, gate, inputs=[], run_id=RUN_ID, ledger_head=_head(run))
+    registry = {**REGISTRY, "leak_check": gate}
+    with pytest.raises(PromoteError, match="leak_check: the gate did not pass"):
+        promote(run, registry, ["leak_check"], attestation=ACCEPT, project_path=proj(run))
+
+
+def test_an_expensive_receipt_that_reported_failure_is_not_attestable(tmp_path):
+    run = make_run(tmp_path)
+    rewrite_receipt(run, "train", lambda body: body.update(result={"passed": False, "loss": 9.0}))
+    with pytest.raises(PromoteError, match="train: the gate did not pass"):
+        attestable_hash(run, "train", REGISTRY, project_path=proj(run))
+    with pytest.raises(PromoteError, match="train: the gate did not pass"):
+        promote(run, REGISTRY, REQUIRED, attestation=ACCEPT, project_path=proj(run))
+
+
+@pytest.mark.parametrize("result", [{"rows": 3}, {"passed": "true"}, {"passed": 1}, [True], None])
+def test_a_receipt_without_a_true_pass_flag_is_refused(tmp_path, result):
+    run = make_run(tmp_path)
+    rewrite_receipt(run, "row_count", lambda body: body.update(result=result))
+    with pytest.raises(PromoteError, match="row_count: the gate did not pass"):
+        promote(run, REGISTRY, REQUIRED, attestation=ACCEPT, project_path=proj(run))
+
+
+@pytest.mark.parametrize("result", [{"rows": 3}, {"passed": "yes"}, "ok", None])
+def test_run_gate_refuses_a_result_without_a_boolean_pass_flag(tmp_path, result):
+    from gdkit.gates import GateError
+
+    run = tmp_path / "run"
+    run.mkdir()
+    gate = Gate("odd", cheap=True, check=lambda run_dir: result)
+    with pytest.raises(GateError, match="passed"):
+        run_gate(run, gate, inputs=[], run_id=RUN_ID, ledger_head="0" * 64)
+    assert not (run / "receipts" / "odd.json").exists()
+
+
+@pytest.mark.parametrize("name", ["", "../escape", "a/b", "has space", "dot.name", "train\n"])
+def test_a_gate_name_must_be_safe_for_paths_and_tags(name):
+    from gdkit.gates import GateError
+
+    with pytest.raises(GateError):
+        Gate(name, cheap=True, check=lambda run_dir: {"passed": True})
+
+
+def _attest_repo(tmp_path):
+    repo = tmp_path / "attest-repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    (repo / "runs" / RUN_ID).mkdir(parents=True)
+    (repo / "runs" / RUN_ID / "ledger.jsonl").write_text("{}\n", encoding="utf-8")
+    _git(repo, "add", "runs")
+    _git(repo, "commit", "-q", "-m", "run commit")
+    owner = _keypair(tmp_path, "owner")
+    signers = _allowed_signers(tmp_path / "allowed_signers", "owner@gdkit", Path(str(owner) + ".pub"))
+    return repo, owner, signers
+
+
+@needs_ssh
+def test_two_expensive_gates_in_one_run_are_attested_separately(tmp_path):
+    repo, owner, signers = _attest_repo(tmp_path)
+    train_digest, judge_digest = "1" * 64, "2" * 64
+    _git(repo, "tag", "-s", f"attest/{RUN_ID}/train", "-m", train_digest, key=owner)
+    _git(repo, "tag", "-s", f"attest/{RUN_ID}/judge", "-m", judge_digest, key=owner)
+    verify = git_attestation(repo, signers)
+    assert verify(RUN_ID, "train", train_digest) is True
+    assert verify(RUN_ID, "judge", judge_digest) is True
+    assert verify(RUN_ID, "train", judge_digest) is False  # one gate's approval does not cover another
+
+
+@needs_ssh
+def test_a_tag_whose_message_only_contains_the_digest_is_refused(tmp_path):
+    repo, owner, signers = _attest_repo(tmp_path)
+    digest = "3" * 64
+    _git(repo, "tag", "-s", f"attest/{RUN_ID}/train", "-m", f"not approved: {digest}", key=owner)
+    assert git_attestation(repo, signers)(RUN_ID, "train", digest) is False
