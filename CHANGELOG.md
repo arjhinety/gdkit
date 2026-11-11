@@ -4,6 +4,9 @@ All notable changes are listed here. The format follows Keep a Changelog, and th
 
 ## Unreleased
 
+- Add AGENTS.md: rules for coding agents, hashing bytes rather than text (the CRLF failure seen in
+  WeightSpaceAbliteration), and the effect of format changes on pinned downstream studies.
+
 ### Provenance slice 5
 
 - Receipt schema 1 changed in place (census rules, attestation tag name and body) relative to e7f3133. No
