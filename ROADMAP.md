@@ -30,7 +30,10 @@ Later lists.
   the project issue log (`gdkit.issues`) with the promote and attest block. Checked read-only against
   WeightSpaceAbliteration's two runs: all four receipts verify as schema 0, stale, not promotable.
 
-261 tests pass locally with `python -m pytest`.
+- Provenance slice 4 (2026-11-11): upstream issue drafts (`gdkit.issues draft`, `amend`) from allow-listed fields,
+  refused when they carry private details; triage tracked as its own flag.
+
+279 tests pass locally with `python -m pytest`.
 
 ## Next
 
@@ -40,13 +43,9 @@ Later lists.
 3. **Contamination check and environment capture merge** (Must 5, 6).
 4. **A defined general-capability check, and the eval harness and prompt hashes in the setup record** (Must 8, 9).
 5. **`gdkit-upgrade` and `installed.json`** (Must 10).
-6. **Provenance slice 4: upstream issue drafts.** `issues draft SLUG` builds a draft from an allow-list of fields
-   (package and version, Python and OS family, summary, expected and actual, reproducer), then refuses it if it holds a
-   run ID, a 64-hex hash, a home path, hostname or username, or a path under `runs/`. Drafts are git-ignored; only their
-   hash is recorded. gdkit prints the draft path and the repo's new-issue URL and contacts nothing.
-7. **Provenance slice 5:** a census helper, the append-only ledger check as a gdkit command and a CI job on push, the
+6. **Provenance slice 5:** a census helper, the append-only ledger check as a gdkit command and a CI job on push, the
    issue log head inside what an attestation signs, and `require_host` (refuse a gate on a different machine).
-8. **Upgrade WeightSpaceAbliteration** to current gdkit: its vendored copy is 8cf73ec plus an uncommitted
+7. **Upgrade WeightSpaceAbliteration** to current gdkit: its vendored copy is 8cf73ec plus an uncommitted
    `contract_version`/`census` patch while its CI installs clean 8cf73ec. Its gates need a `passed` field and a
    re-run to promote.
 

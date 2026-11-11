@@ -4,6 +4,17 @@ All notable changes are listed here. The format follows Keep a Changelog, and th
 
 ## Unreleased
 
+### Provenance slice 4
+
+- `python -m gdkit.issues draft SLUG` writes an upstream issue draft to `.gdkit/issues/drafts/<slug>.md` (the folder
+  is git-ignored) from allow-listed fields only, and records a `drafted` event with its sha256. The rendered text is
+  refused, with nothing written or recorded, if it contains a 64-character hex hash, a home path, a `runs/` path, a
+  known run ID, this machine's or the linked run's username or hostname, or a pattern from `.gdkit/issues/deny.txt`.
+  gdkit prints the GitHub new-issue URL and contacts nothing.
+- `amend` replaces an issue's summary, expected, actual or reproducer text, so a refused draft can be fixed.
+- Fixed: filing an untriaged degrading issue cleared its promote block. Triage is now its own flag, reset when an
+  issue reopens.
+
 ### Provenance slices 1 to 3
 
 - Receipts carry `receipt_schema` (1). `promote` applies each schema's rules from `RECEIPT_RULES`. A receipt without

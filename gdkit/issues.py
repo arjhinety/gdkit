@@ -8,6 +8,8 @@
     python -m gdkit.issues workaround SLUG --description TEXT [--commit SHA]
     python -m gdkit.issues filed SLUG --url URL
     python -m gdkit.issues resolve SLUG --resolution R [--resolved-version V] [--duplicate-of SLUG] [--note TEXT]
+    python -m gdkit.issues amend SLUG [--summary TEXT] [--expected TEXT] [--actual TEXT] [--reproducer PATH]
+    python -m gdkit.issues draft SLUG [--project-root .] [--runs-dir runs] [--deny REGEX]
     python -m gdkit.issues list | show SLUG
 
 All commands take ``--log`` (default ``.gdkit/issues/log.jsonl``) and print one JSON object.
@@ -17,7 +19,9 @@ time and span runs, and an entry appended to a run's ledger after its gates woul
 entry is ``{seq, ts, event, slug, data, prev_hash, entry_hash}`` and is checked with ``gdkit.ledger.verify``. An
 issue's state is the fold of its events, so a status change is a new event, never an edit.
 
-Lifecycle. ``observed`` -> ``triaged`` -> ``filed`` -> ``resolved``. A ``workaround`` event can come at any point.
+Lifecycle. ``observed`` -> ``triaged`` -> ``drafted`` -> ``filed`` -> ``resolved``. ``workaround`` and ``amended``
+events can come at any point. Triage is tracked as its own flag, so drafting or filing an issue does not count as
+triaging it.
 ``observed_again`` adds an occurrence and **reopens** a resolved issue, so a regression blocks again. Resolutions:
 ``fixed-upstream``, ``adopted`` (we moved to a fixed version), ``wont-fix``, ``not-a-bug``, ``duplicate``.
 
@@ -37,15 +41,18 @@ workaround or a downgrade, and nothing checks who did. The issue log's head goes
 model card, so a reviewer can see which state was used.
 
 Upstream. Nothing here contacts any service. Filing upstream is a human step; ``filed`` only records the URL the
-person supplies. Drafting a redacted upstream issue is a later slice.
+person supplies. ``draft`` writes a local upstream draft from allow-listed fields only and refuses it if it
+carries private details; see ``draft_issue``.
 """
 
 from __future__ import annotations
 
 import argparse
+import getpass
 import hashlib
 import json
 import os
+import platform
 import re
 import sys
 from datetime import datetime, timezone
@@ -62,8 +69,15 @@ _SLUG = re.compile(r"[a-z0-9]+(-[a-z0-9]+)*")
 _URL = re.compile(r"https?://\S+")
 
 
+AMENDABLE = ("summary", "expected", "actual", "reproducer")
+
+
 class IssueError(ValueError):
     """An issue event is malformed, refers to an unknown issue, or the log does not verify."""
+
+
+class DraftError(IssueError):
+    """An upstream draft was refused because it would carry private details."""
 
 
 def _now() -> str:
@@ -132,8 +146,10 @@ class IssueLog:
                     **data,
                     "slug": slug,
                     "status": "observed",
+                    "triaged": False,
                     "occurrences": 1,
                     "workaround": None,
+                    "draft": None,
                     "issue_url": None,
                     "resolution": None,
                     "reopened": 0,
@@ -148,20 +164,29 @@ class IssueLog:
                     # A regression: the old workaround is not assumed to still hold. It is kept for reference and
                     # must be recorded again to clear the block.
                     issue.update(status="observed", resolution=None, reopened=issue["reopened"] + 1,
-                                 previous_workaround=issue["workaround"], workaround=None)
+                                 previous_workaround=issue["workaround"], workaround=None, triaged=False)
             elif event == "triaged":
                 for key in ("severity", "kind"):
                     if data.get(key):
                         issue[key] = data[key]
                 issue["affected_runs"] = _union(issue["affected_runs"], data.get("affected_runs", []))
                 issue["affected_gates"] = _union(issue["affected_gates"], data.get("affected_gates", []))
+                issue["triaged"] = True
                 if issue["status"] == "observed":
                     issue["status"] = "triaged"
+            elif event == "amended":
+                for key in AMENDABLE:
+                    if data.get(key) is not None:
+                        issue[key] = data[key]
+            elif event == "drafted":
+                issue["draft"] = {"path": data["path"], "sha256": data["sha256"]}
+                if issue["status"] in ("observed", "triaged"):
+                    issue["status"] = "drafted"
             elif event == "workaround":
                 issue["workaround"] = {"description": data["description"], "commit": data.get("commit")}
             elif event == "filed":
                 issue["issue_url"] = data["url"]
-                if issue["status"] in ("observed", "triaged"):
+                if issue["status"] in ("observed", "triaged", "drafted"):
                     issue["status"] = "filed"
             elif event == "resolved":
                 issue.update(status="resolved", resolution=data["resolution"],
@@ -263,6 +288,19 @@ class IssueLog:
         return self._append("triaged", slug, {"severity": severity, "kind": kind, "affected_runs": list(affected_runs),
                                               "affected_gates": list(affected_gates), "note": note})
 
+    def amend(self, slug: str, **fields: str | None) -> dict[str, Any]:
+        """Replace the text of summary, expected, actual or reproducer. The earlier text stays in the log."""
+        self._known(slug)
+        unknown = set(fields) - set(AMENDABLE)
+        if unknown:
+            raise IssueError(f"only {', '.join(AMENDABLE)} can be amended, not {', '.join(sorted(unknown))}")
+        changes = {key: value for key, value in fields.items() if value is not None}
+        if not changes:
+            raise IssueError(f"amend needs at least one of: {', '.join(AMENDABLE)}")
+        if "summary" in changes and not changes["summary"].strip():
+            raise IssueError("the summary may not be empty")
+        return self._append("amended", slug, changes)
+
     def workaround(self, slug: str, *, description: str, commit: str | None = None) -> dict[str, Any]:
         self._known(slug)
         if not description or not description.strip():
@@ -335,7 +373,7 @@ def blocking_reason(issue: dict[str, Any]) -> str | None:
         return None
     if issue["severity"] == "blocking" and issue["workaround"] is None:
         return BLOCKED_NO_WORKAROUND
-    if issue["severity"] == "degrading" and issue["status"] == "observed":
+    if issue["severity"] == "degrading" and not issue.get("triaged"):
         return BLOCKED_UNTRIAGED
     return None
 
@@ -371,6 +409,147 @@ def blocking_issues(log_path: str | Path, run_id: str, gates: Iterable[str]) -> 
             slug = issue["slug"]
             messages.append(f"issue {slug} is {reason}. Clear it with one of: " + " ; ".join(clearing_commands(slug, reason)))
     return log.head, messages
+
+
+# --- upstream drafts -------------------------------------------------------------------------
+
+DRAFTS_DIR = ".gdkit/issues/drafts"
+DENY_FILE = ".gdkit/issues/deny.txt"
+_HEX64 = re.compile(r"(?<![0-9a-fA-F])[0-9a-fA-F]{64}(?![0-9a-fA-F])")
+_HOME = re.compile(r"(?i)(?:[a-z]:\\users\\[^\\\s]+|/home/[^/\s]+|/users/[^/\s]+)")
+_RUNS_PATH = re.compile(r"(?<![A-Za-z0-9_.-])runs[/\\]")
+_GITHUB = re.compile(r"https://github\.com/[^/\s]+/[^/\s]+?/?")
+_LANGUAGES = {".py": "python", ".sh": "bash", ".ps1": "powershell", ".json": "json", ".yaml": "yaml", ".yml": "yaml"}
+
+
+def _word(token: str) -> re.Pattern[str]:
+    return re.compile(r"(?i)(?<![A-Za-z0-9])" + re.escape(token) + r"(?![A-Za-z0-9])")
+
+
+def _run_ledger_host(runs_dir: Path, run_id: str) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    """(host summary from the run's ledger, full host.json or {}) for a linked run. Read-only."""
+    run = runs_dir / run_id
+    summary = None
+    ledger = run / "ledger.jsonl"
+    if ledger.is_file():
+        for line in ledger.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                entry = json.loads(line)
+                if entry.get("event") and entry.get("op") == "host":
+                    summary = entry["params"].get("summary")
+    host_file = run / "host.json"
+    full = json.loads(host_file.read_text(encoding="utf-8")) if host_file.is_file() else {}
+    return summary, full
+
+
+def _private_rules(issue: dict[str, Any], root: Path, runs_dir: Path, deny: Iterable[str]) -> list[tuple[str, Any]]:
+    """(rule name, compiled pattern) pairs the draft must not match."""
+    rules: list[tuple[str, Any]] = [
+        ("a 64-character hex hash (ledger and file hashes stay private)", _HEX64),
+        ("a home path", _HOME),
+        ("a runs/ path", _RUNS_PATH),
+    ]
+    home = str(Path.home())
+    if len(home) > 3:
+        rules.append(("a home path", re.compile(re.escape(home), re.I)))
+        rules.append(("a home path", re.compile(re.escape(Path.home().as_posix()), re.I)))
+    run_ids = set(issue.get("affected_runs") or [])
+    if issue.get("observed_in"):
+        run_ids.add(issue["observed_in"]["run_id"])
+    if runs_dir.is_dir():
+        run_ids.update(p.name for p in runs_dir.iterdir() if p.is_dir())
+    users, hosts = set(), {platform.node()}
+    try:
+        users.add(getpass.getuser())
+    except Exception:
+        pass
+    if issue.get("observed_in"):
+        _, full = _run_ledger_host(runs_dir, issue["observed_in"]["run_id"])
+        users.add(full.get("user") or "")
+        hosts.add((full.get("platform") or {}).get("node") or "")
+    rules += [("a run id", _word(r)) for r in sorted(run_ids) if len(r) >= 2]
+    rules += [("this machine's username", _word(u)) for u in sorted(users) if len(u) >= 2]
+    rules += [("this machine's hostname", _word(h)) for h in sorted(hosts) if len(h) >= 2]
+    patterns = list(deny)
+    deny_file = root / DENY_FILE
+    if deny_file.is_file():
+        patterns += [line.strip() for line in deny_file.read_text(encoding="utf-8").splitlines()
+                     if line.strip() and not line.lstrip().startswith("#")]
+    rules += [(f"deny pattern {p}", re.compile(p)) for p in patterns]
+    return rules
+
+
+def _render(issue: dict[str, Any], root: Path, runs_dir: Path) -> str:
+    """The draft, built only from allow-listed fields."""
+    target = issue.get("target") or {}
+    summary = None
+    if issue.get("observed_in"):
+        summary, _ = _run_ledger_host(runs_dir, issue["observed_in"]["run_id"])
+    if summary:
+        python, system = summary["python"], summary["platform"]
+        environment = f"Python {python['version']} ({python['implementation']}), {system['system']} {system['machine']}"
+    else:
+        environment = (f"Python {platform.python_version()} ({platform.python_implementation()}), "
+                       f"{platform.system()} {platform.machine()}")
+    lines = [f"# {issue['summary'].strip()}", ""]
+    if target.get("package"):
+        lines.append(f"**Package:** {target['package']} {target.get('version') or ''}".rstrip())
+    lines += [f"**Environment:** {environment}", ""]
+    lines += ["## What happened", "", (issue.get("actual") or "(not recorded)").strip(), ""]
+    lines += ["## What was expected", "", (issue.get("expected") or "(not recorded)").strip(), ""]
+    if issue.get("reproducer"):
+        path = root / issue["reproducer"]
+        if not path.is_file():
+            raise DraftError(f"reproducer {issue['reproducer']} not found under {root}; fix the file or "
+                             f"python -m gdkit.issues amend {issue['slug']} --reproducer PATH")
+        code = path.read_text(encoding="utf-8").rstrip("\n")
+        lines += ["## Reproducer", "", f"```{_LANGUAGES.get(path.suffix, '')}", code, "```", ""]
+    return "\n".join(lines)
+
+
+def draft_issue(
+    log: IssueLog,
+    slug: str,
+    *,
+    project_root: str | Path = ".",
+    runs_dir: str | Path | None = None,
+    deny: Iterable[str] = (),
+) -> dict[str, Any]:
+    """Write an upstream issue draft for ``slug`` and record it. Contacts nothing.
+
+    The draft is built only from allow-listed fields: summary, package and version, Python and OS (from the linked
+    run's host summary, else this machine), what happened, what was expected, and the reproducer file. Evidence,
+    fingerprints, run links, workarounds and affected gates are never included. The rendered text is then checked,
+    and refused if it contains a 64-character hex hash, a home path, a ``runs/`` path, a known run ID, this
+    machine's (or the linked run's) username or hostname, or a pattern from ``.gdkit/issues/deny.txt``. A refused
+    draft writes nothing and records nothing; ``amend`` (or editing the reproducer file) is the way forward.
+    """
+    issue = log._known(slug)
+    root = Path(project_root)
+    runs = Path(runs_dir) if runs_dir is not None else root / "runs"
+    text = _render(issue, root, runs)
+    found = []
+    for number, line in enumerate(text.splitlines(), start=1):
+        for name, pattern in _private_rules(issue, root, runs, deny):
+            if pattern.search(line) and (name, number) not in found:
+                found.append((name, number))
+    if found:
+        where = "; ".join(f"{name} on line {number}" for name, number in found)
+        raise DraftError(
+            f"the draft for {slug} is refused: it contains {where}. Change the text with python -m gdkit.issues "
+            f"amend {slug} --summary/--expected/--actual TEXT, edit the reproducer file, or adjust {DENY_FILE}"
+        )
+    drafts = root / DRAFTS_DIR
+    drafts.mkdir(parents=True, exist_ok=True)
+    (drafts / ".gitignore").write_bytes(b"*\n")
+    data = (text + "\n").encode("utf-8")
+    rel = f"{DRAFTS_DIR}/{slug}.md"
+    (root / rel).write_bytes(data)
+    digest = hashlib.sha256(data).hexdigest()
+    log._append("drafted", slug, {"path": rel, "sha256": digest})
+    repo = (issue.get("target") or {}).get("repo_url") or ""
+    url = repo.rstrip("/") + "/issues/new" if _GITHUB.fullmatch(repo) else None
+    return {"path": rel, "sha256": digest, "new_issue_url": url}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -412,6 +591,15 @@ def main(argv: list[str] | None = None) -> int:
     resolve.add_argument("--resolved-version")
     resolve.add_argument("--duplicate-of")
     resolve.add_argument("--note")
+    amend = commands.add_parser("amend")
+    amend.add_argument("slug")
+    for name in AMENDABLE:
+        amend.add_argument(f"--{name}")
+    draft = commands.add_parser("draft")
+    draft.add_argument("slug")
+    draft.add_argument("--project-root", default=".")
+    draft.add_argument("--runs-dir")
+    draft.add_argument("--deny", action="append", default=[], help="an extra regular expression the draft must not match")
     commands.add_parser("list")
     show = commands.add_parser("show")
     show.add_argument("slug")
@@ -427,6 +615,10 @@ def main(argv: list[str] | None = None) -> int:
             ]}
         elif args.command == "show":
             out = {"ok": True, "issue": log._known(args.slug)}
+        elif args.command == "draft":
+            result = draft_issue(log, args.slug, project_root=args.project_root, runs_dir=args.runs_dir, deny=args.deny)
+            out = {"ok": True, **result, "note": "gdkit contacted nothing. Review the draft, file it by hand, then "
+                   f"record it: python -m gdkit.issues filed {args.slug} --url URL"}
         else:
             if args.command == "observe":
                 entry = log.observe(
@@ -441,6 +633,8 @@ def main(argv: list[str] | None = None) -> int:
             elif args.command == "triage":
                 entry = log.triage(args.slug, severity=args.severity, kind=args.kind, affected_runs=args.affects_run,
                                    affected_gates=args.affects_gate, note=args.note)
+            elif args.command == "amend":
+                entry = log.amend(args.slug, **{name: getattr(args, name) for name in AMENDABLE})
             elif args.command == "workaround":
                 entry = log.workaround(args.slug, description=args.description, commit=args.commit)
             elif args.command == "filed":

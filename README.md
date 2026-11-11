@@ -37,6 +37,12 @@ vendored under `vendor/` (see NOTICE and SOURCE.lock).
   writing to it. `promote` and `attest` refuse while an unresolved issue that affects the run is blocking with no
   workaround, or degrading and untriaged. Anyone can append the event that clears it, so this is a visible record,
   not enforcement. gdkit never contacts an upstream repo; `filed` records the URL a person filed.
+- **Upstream drafts.** `python -m gdkit.issues draft SLUG` writes `.gdkit/issues/drafts/<slug>.md` (git-ignored)
+  from allow-listed fields only: summary, package and version, Python and OS from the linked run's host summary,
+  what happened, what was expected, and the reproducer file. It refuses the draft, writing and recording nothing,
+  if the text holds a 64-character hex hash, a home path, a `runs/` path, a known run ID, this machine's or the
+  run's username or hostname, or a pattern from `.gdkit/issues/deny.txt`. `amend` rewrites the issue's text. A clean
+  draft is recorded by hash and gdkit prints the GitHub new-issue URL; filing it is up to you.
 - **Promotion.** `promote()` checks each required receipt, refuses any whose result is not `passed: true`, re-runs cheap
   gates, and requires an SSH-signed attestation for expensive ones. Each expensive gate has its own tag,
   `attest/<run_id>/<gate>`, whose message is exactly the receipt hash. It refuses explore runs.
