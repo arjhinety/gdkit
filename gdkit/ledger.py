@@ -97,6 +97,30 @@ class Ledger:
         """The ``seq`` the next recorded entry will get."""
         return self._seq
 
+    def record_event(
+        self,
+        op: str,
+        *,
+        params: dict[str, Any] | None = None,
+        input_hash: str | None = None,
+        output_hash: str | None = None,
+    ) -> dict[str, Any]:
+        """Append an entry that is not a data step (a host record, a decision, a config file).
+
+        It carries ``"event": true`` and zero row counts, so cards leave it out of the dataset counts. The mode
+        rules still apply: registered mode needs both content hashes; explore mode allows none, so callers put
+        the hash in ``params``.
+        """
+        return self.record(
+            op,
+            rows_before=0,
+            rows_after=0,
+            params=params,
+            input_hash=input_hash,
+            output_hash=output_hash,
+            event=True,
+        )
+
     def _tail(self) -> tuple[int, str]:
         last = None
         with open(self.path, encoding="utf-8") as handle:
@@ -116,6 +140,7 @@ class Ledger:
         input_hash: str | None = None,
         output_hash: str | None = None,
         boundary: bool = False,
+        event: bool = False,
     ) -> dict[str, Any]:
         """Append one entry, enforcing the mode rules. Returns the stored entry.
 
@@ -150,6 +175,8 @@ class Ledger:
             "boundary": boundary,
             "prev_hash": self._prev,
         }
+        if event:
+            entry["event"] = True
         entry["entry_hash"] = _entry_hash(entry)
         line = json.dumps(entry, sort_keys=True, separators=(",", ":"), allow_nan=False)
         with open(self.path, "a", encoding="utf-8") as handle:

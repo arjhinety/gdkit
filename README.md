@@ -16,7 +16,27 @@ vendored under `vendor/` (see NOTICE and SOURCE.lock).
 - **Gate receipts.** `run_gate` writes an unsigned receipt bound to the run id, the ledger head, the gate's source hash and
   the input file hashes. A gate's check must return a dict with a boolean `passed` field, for example
   `{"passed": True, "rows": 3}`. Any other result is refused and no receipt is written. Gate names may use only letters,
-  digits, `_` and `-`.
+  digits, `_` and `-`. Each receipt carries `receipt_schema` (now 1). With `capture_log=True`, gdkit captures
+  everything the check writes to stdout and stderr at the file-descriptor level, subprocesses included, and hashes the
+  log into the receipt. While the gate runs the log is `logs/<gate>.log.partial`, so you can watch it with `tail -f` or
+  `Get-Content -Wait`. When the check returns or raises it becomes `logs/<gate>.log`. On Windows a reader that opened
+  the partial file without delete sharing (a plain Python `open`) blocks the rename; gdkit then copies it instead and
+  records `"finalised": "copied"` and whether the partial file was left behind (`partial_left`). The receipt also records the platform
+  and locale encoding, because the log keeps the bytes as written (on Windows, CRLF and the locale encoding from
+  child processes and earlier handlers, UTF-8 from `print`).
+- **Old receipts.** A receipt without `receipt_schema` (gdkit before this field) is schema 0. `gdkit.audit.verify_run`
+  checks it under the rules it was written with: no pass flag, tag `attest/<run_id>`. `promote` refuses it, because a
+  failing receipt written today could otherwise drop the field to get the older rules. Re-run the gate to promote.
+- **Run recording.** `python -m gdkit.run start` creates `runs/<run_id>/`, freezes the answers, and records
+  `run.json`. `host`, `scope`, `config`, `decide` and `record` write each side file as exact bytes and record its
+  hash as an event in the ledger. The full host record stays in a git-ignored `host.json`; the ledger gets its hash
+  and a summary without hostname, username or paths. Record everything before the gates: a receipt binds the ledger
+  head, so a later entry makes it stale. `python -m gdkit.run audit RUN_DIR` prints the `verify_run` report.
+- **Issues.** `python -m gdkit.issues` keeps a project-wide, hash-chained log of problems found while running
+  (`observe`, `again`, `triage`, `workaround`, `filed`, `resolve`). Issues link to a run by its ledger head without
+  writing to it. `promote` and `attest` refuse while an unresolved issue that affects the run is blocking with no
+  workaround, or degrading and untriaged. Anyone can append the event that clears it, so this is a visible record,
+  not enforcement. gdkit never contacts an upstream repo; `filed` records the URL a person filed.
 - **Promotion.** `promote()` checks each required receipt, refuses any whose result is not `passed: true`, re-runs cheap
   gates, and requires an SSH-signed attestation for expensive ones. Each expensive gate has its own tag,
   `attest/<run_id>/<gate>`, whose message is exactly the receipt hash. It refuses explore runs.
@@ -98,6 +118,10 @@ Copy `skills/overfit-clinic/` into `~/.claude/skills/`, then run `/overfit-clini
   directory. Without one, the declaration lists live only in `.gdkit/project.yaml` before the freeze, where deleting
   them hides them. See the explore-mode item in `ROADMAP.md`.
 - The same user can still bypass some checks. See `ROADMAP.md`.
+- A captured gate log holds the bytes as written, so line endings differ by OS (CRLF on Windows from the console
+  streams and child processes). The same check gives a different log hash on Windows and Linux.
+- Issue blocks are cleared by events anyone can append (a workaround, a triage, a resolution). Nothing checks who
+  appended them.
 
 See `ROADMAP.md` for status and planned work.
 

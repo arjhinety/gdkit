@@ -10,16 +10,35 @@ A gate's check returns a JSON object with a boolean ``passed`` field, for exampl
 
 Gate names may use only letters, digits, ``_`` and ``-``, because they become file names and git tag names.
 
+Every receipt carries ``receipt_schema``, the version of the rules it was written under (now 1). A receipt
+without it was written by gdkit before versions existed (schema 0). Those can be verified with
+``gdkit.audit.verify_run`` but not promoted; see ``gdkit.promote``.
+
+``run_gate(..., capture_log=True)`` captures everything the check writes to stdout and stderr, at the file
+descriptor level (subprocesses and earlier logging handlers included, see ``_capture_output``), into
+``logs/<gate>.log.partial``, which can be watched while the gate runs. When the check returns or raises, the file
+is renamed to ``logs/<gate>.log`` (copied instead if a reader blocks the rename, see ``_finalise_log``) and its
+path, sha256, size, how it was finalised, platform and locale encoding go in the receipt. gdkit writes the log, not
+the check, so promote's re-run of a cheap gate never writes it.
+
+Optional ``contract_version`` (what a pass means for the project's harness) and ``census`` (what the gate counted)
+are stored in the receipt as given.
+
 Receipts are unsigned. Their ``receipt_hash`` is a sha256 of the body, so an accidental edit is
 caught. It does not stop someone who recomputes the hash. The promote step is what refuses forgery.
 """
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import inspect
 import json
+import locale
+import os
 import re
+import shutil
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -27,6 +46,9 @@ from typing import Any, Callable
 from gdkit.stream_hash import canonical_json_bytes
 
 RECEIPTS_DIR = "receipts"
+LOGS_DIR = "logs"
+PARTIAL_SUFFIX = ".partial"
+RECEIPT_SCHEMA = 1
 _NAME = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
@@ -67,6 +89,71 @@ def sha256_path(path: Path) -> str:
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
+def _flush(*streams: Any) -> None:
+    for stream in streams:
+        try:
+            stream.flush()
+        except Exception:  # a closed or odd stream must not lose the capture
+            pass
+
+
+@contextlib.contextmanager
+def _capture_output(sink: Any) -> Any:
+    """Send everything written to stdout and stderr into ``sink`` (the open ``.partial`` log, binary) for the duration.
+
+    Two layers, because each misses what the other catches:
+    * file descriptors 1 and 2 are pointed at the sink with ``os.dup2``. That catches subprocesses, C extensions,
+      and Python stream objects created earlier that still write to those descriptors, such as a
+      ``logging.StreamHandler`` bound to the real ``sys.stderr``;
+    * ``sys.stdout`` and ``sys.stderr`` are replaced by a text stream on the sink. That catches ``print`` when the
+      current ``sys.stdout`` is not descriptor 1, as under pytest's capture.
+    All of them share one file offset, so lines land in the order they were written. Stream objects that were
+    created earlier and write somewhere other than descriptors 1 and 2 are not captured.
+    """
+    old_out, old_err = sys.stdout, sys.stderr
+    _flush(old_out, old_err)
+    try:
+        saved = (os.dup(1), os.dup(2))
+    except OSError as exc:
+        raise GateError(f"capture_log needs file descriptors 1 and 2, which this process does not have: {exc}") from exc
+    text = None
+    try:
+        os.dup2(sink.fileno(), 1)
+        os.dup2(sink.fileno(), 2)
+        text = open(os.dup(sink.fileno()), "w", encoding="utf-8", errors="replace", newline="\n", buffering=1)
+        sys.stdout = sys.stderr = text
+        yield
+    finally:
+        _flush(text, old_out, old_err, sys.__stdout__, sys.__stderr__)
+        sys.stdout, sys.stderr = old_out, old_err
+        if text is not None:
+            text.close()
+        os.dup2(saved[0], 1)
+        os.dup2(saved[1], 2)
+        os.close(saved[0])
+        os.close(saved[1])
+
+
+def _finalise_log(partial: Path, final: Path) -> tuple[str, bool]:
+    """Move the partial log to its final name. Returns (how, whether the partial file was left behind).
+
+    A rename, normally. On Windows a rename fails while another process holds the partial file open without
+    delete sharing (a plain Python ``open`` does; PowerShell ``Get-Content -Wait`` and Git Bash ``tail -f`` do not).
+    Then the bytes are copied to the final name instead, which readers allow, and the partial file is removed if
+    possible. Either way the final log exists, and the receipt hashes it.
+    """
+    try:
+        os.replace(partial, final)
+        return "renamed", False
+    except PermissionError:
+        shutil.copyfile(partial, final)
+        try:
+            partial.unlink()
+            return "copied", False
+        except OSError:
+            return "copied", True
+
+
 def run_gate(
     run_dir: str | Path,
     gate: Gate,
@@ -74,6 +161,9 @@ def run_gate(
     inputs: list[str],
     run_id: str,
     ledger_head: str,
+    capture_log: bool = False,
+    contract_version: str | None = None,
+    census: Any = None,
 ) -> Path:
     """Run ``gate`` on ``run_dir`` and write its receipt. Returns the receipt path.
 
@@ -82,9 +172,27 @@ def run_gate(
     """
     run_dir = Path(run_dir)
     input_hashes = {rel: sha256_path(run_dir / rel) for rel in inputs}
-    result = gate.check(run_dir)
+    log_bytes = None
+    if capture_log:
+        logs = run_dir / LOGS_DIR
+        logs.mkdir(exist_ok=True)
+        partial = logs / f"{gate.name}.log{PARTIAL_SUFFIX}"
+        final = logs / f"{gate.name}.log"
+        sink = open(partial, "wb")
+        try:
+            with _capture_output(sink):
+                result = gate.check(run_dir)
+        finally:
+            # Renamed even when the check raises, so the failure's output is kept. Every descriptor on the file
+            # is closed first; on Windows an open handle would block the rename.
+            sink.close()
+            finalised, partial_left = _finalise_log(partial, final)
+            log_bytes = final.read_bytes()
+    else:
+        result = gate.check(run_dir)
     check_result(gate.name, result)
-    body = {
+    body: dict[str, Any] = {
+        "receipt_schema": RECEIPT_SCHEMA,
         "run_id": run_id,
         "gate": gate.name,
         "cheap": gate.cheap,
@@ -93,6 +201,24 @@ def run_gate(
         "result": result,
         "ledger_head": ledger_head,
     }
+    if log_bytes is not None:
+        body["log"] = {
+            "path": f"{LOGS_DIR}/{gate.name}.log",
+            "sha256": hashlib.sha256(log_bytes).hexdigest(),
+            "bytes": len(log_bytes),
+            "finalised": finalised,  # "renamed", or "copied" when a reader blocked the rename
+            "partial_left": partial_left,
+            # The log keeps the bytes as written, so these say how to read them: other writers (handlers made
+            # earlier, child processes) use the locale encoding and the OS line endings; gdkit's own stream
+            # writes UTF-8 with LF.
+            "platform": sys.platform,
+            "locale_encoding": locale.getpreferredencoding(False),
+            "gdkit_stream_encoding": "utf-8",
+        }
+    if contract_version is not None:
+        body["contract_version"] = contract_version
+    if census is not None:
+        body["census"] = census
     body["receipt_hash"] = receipt_hash(body)
     out_dir = run_dir / RECEIPTS_DIR
     out_dir.mkdir(exist_ok=True)

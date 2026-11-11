@@ -24,7 +24,13 @@ Later lists.
   workflow split so the signing job runs no repository code, and the explore-to-registered cross-check at the freeze.
   See `CHANGELOG.md`.
 
-183 tests pass locally with `python -m pytest`.
+- Provenance slices 1 to 3 (designed with a Fable design review, 2026-11-11): receipt schema versions with
+  verify-only schema 0 (`gdkit.audit.verify_run`), file-descriptor-level gate log capture, event entries left out of
+  dataset counts, card schema; run recording (`gdkit.run`, `gdkit.host`, `config.json` replacing `model_setup.json`);
+  the project issue log (`gdkit.issues`) with the promote and attest block. Checked read-only against
+  WeightSpaceAbliteration's two runs: all four receipts verify as schema 0, stale, not promotable.
+
+261 tests pass locally with `python -m pytest`.
 
 ## Next
 
@@ -34,8 +40,24 @@ Later lists.
 3. **Contamination check and environment capture merge** (Must 5, 6).
 4. **A defined general-capability check, and the eval harness and prompt hashes in the setup record** (Must 8, 9).
 5. **`gdkit-upgrade` and `installed.json`** (Must 10).
+6. **Provenance slice 4: upstream issue drafts.** `issues draft SLUG` builds a draft from an allow-list of fields
+   (package and version, Python and OS family, summary, expected and actual, reproducer), then refuses it if it holds a
+   run ID, a 64-hex hash, a home path, hostname or username, or a path under `runs/`. Drafts are git-ignored; only their
+   hash is recorded. gdkit prints the draft path and the repo's new-issue URL and contacts nothing.
+7. **Provenance slice 5:** a census helper, the append-only ledger check as a gdkit command and a CI job on push, the
+   issue log head inside what an attestation signs, and `require_host` (refuse a gate on a different machine).
+8. **Upgrade WeightSpaceAbliteration** to current gdkit: its vendored copy is 8cf73ec plus an uncommitted
+   `contract_version`/`census` patch while its CI installs clean 8cf73ec. Its gates need a `passed` field and a
+   re-run to promote.
 
 ## Open decisions and unknowns
+
+- **Gate log bytes differ by OS (decided 2026-11-11: keep raw).** On Windows one log mixes UTF-8 + LF (`print`) with
+  the locale encoding + CRLF (child processes, handlers made earlier). The log keeps the exact bytes; the receipt
+  records the platform and locale encoding so a reader can decode it. Cross-OS hashes of the same check differ.
+  Not tested: a handler bound to a real interactive Windows console, which writes with `WriteConsoleW`.
+- **Late notes (decided 2026-11-11: keep the rule).** Everything is recorded before the gates; late facts go in the
+  issue log.
 
 - **Same-user bypass check (deferred).** A review of another project's approval gates found three patterns that the same
   user can get around: an owner flag read from an environment variable, approvals written as text rows that nothing checks

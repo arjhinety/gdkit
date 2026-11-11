@@ -1,7 +1,8 @@
 """Model and dataset cards generated from the run's ledger (Must 2).
 
 A card is a JSON document. Every value comes from the ledger, the run's receipts, its paper lookups, or its
-``model_setup.json``. Nothing is typed in by hand. ``audit_card`` regenerates a card from the run and
+``config.json`` (recorded by ``gdkit.run``; it must still match its recorded hash). Runs without a ``config``
+entry fall back to ``model_setup.json``. Nothing is typed in by hand. ``audit_card`` regenerates a card from the run and
 compares it with the file, so a hand edit or a card built from an older ledger shows up as a mismatch.
 
 Dataset counts follow these ledger conventions (op names are the contract). Paper lookups and the
@@ -15,6 +16,7 @@ preregistration entry are not data entries and are left out:
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -33,6 +35,8 @@ MODEL_SETUP_FIELDS = (
     "prompt_template_sha256",
 )
 CARDS_DIR = "cards"
+# Bumped when card fields change, so audit_card can say "regenerate" instead of listing every new field.
+CARD_SCHEMA = 2
 
 
 class CardError(ValueError):
@@ -55,7 +59,9 @@ def _head(entries: list[dict[str, Any]]) -> str:
 def dataset_card(run_dir: str | Path) -> dict[str, Any]:
     run_dir = Path(run_dir)
     entries = _entries(run_dir)
-    data_entries = [e for e in entries if e["op"] not in (LOOKUP_OP, PREREG_OP)]
+    # Events (host, decisions, config...) are marked in the entry. Lookups and the preregistration predate
+    # that mark and are recognised by op.
+    data_entries = [e for e in entries if not e.get("event") and e["op"] not in (LOOKUP_OP, PREREG_OP)]
     if not data_entries:
         raise CardError("the ledger has no data entries")
     raw = data_entries[0]["rows_after"]
@@ -68,6 +74,7 @@ def dataset_card(run_dir: str | Path) -> dict[str, Any]:
                 dropped.append(column)
     return {
         "card": "dataset",
+        "card_schema": CARD_SCHEMA,
         "run_id": entries[0]["run_id"],
         "mode": entries[0]["mode"],
         "ledger_head": _head(entries),
@@ -80,16 +87,26 @@ def dataset_card(run_dir: str | Path) -> dict[str, Any]:
     }
 
 
-def model_card(run_dir: str | Path) -> dict[str, Any]:
+def model_card(run_dir: str | Path, *, issues_path: str | Path | None = None) -> dict[str, Any]:
+    """The model card. With ``issues_path``, it lists the issues that affect the run and the issue log head;
+    without it, both fields are None (not checked), which is different from an empty list."""
     run_dir = Path(run_dir)
     entries = _entries(run_dir)
-    setup_path = run_dir / MODEL_SETUP_FILE
-    if not setup_path.exists():
-        raise CardError(f"{MODEL_SETUP_FILE} is missing")
+    latest = _latest_events(entries)
+    config = latest.get("config")
+    if config is not None:
+        # config.json, recorded by gdkit.run, replaces model_setup.json. It must still be the recorded file.
+        setup_path = run_dir / config["path"]
+        if not setup_path.exists() or hashlib.sha256(setup_path.read_bytes()).hexdigest() != config["sha256"]:
+            raise CardError(f"{config['path']} has changed since it was recorded (or is missing)")
+    else:
+        setup_path = run_dir / MODEL_SETUP_FILE
+        if not setup_path.exists():
+            raise CardError(f"no config entry in the ledger and {MODEL_SETUP_FILE} is missing")
     setup = json.loads(setup_path.read_text(encoding="utf-8"))
     missing = [field for field in MODEL_SETUP_FIELDS if not setup.get(field)]
     if missing:
-        raise CardError(f"{MODEL_SETUP_FILE} lacks: {', '.join(missing)}")
+        raise CardError(f"{setup_path.name} lacks: {', '.join(missing)}")
 
     receipts = {}
     receipts_dir = run_dir / RECEIPTS_DIR
@@ -108,6 +125,7 @@ def model_card(run_dir: str | Path) -> dict[str, Any]:
     searched = prereg.get("explore_runs_dir") if prereg is not None else None
     return {
         "card": "model",
+        "card_schema": CARD_SCHEMA,
         "run_id": entries[0]["run_id"],
         "mode": entries[0]["mode"],
         "ledger_head": _head(entries),
@@ -120,7 +138,49 @@ def model_card(run_dir: str | Path) -> dict[str, Any]:
         "preregistration_changed_after_explore": changed,
         "preregistration_explore_runs_checked": checked,
         "preregistration_explore_runs_dir": searched,
+        "config_sha256_recorded": (latest.get("config") or {}).get("sha256"),
+        "scope_sha256": (latest.get("scope") or {}).get("sha256"),
+        "host_sha256": (latest.get("host") or {}).get("sha256"),
+        "host_summary": (latest.get("host") or {}).get("summary"),
+        "decisions": [e["params"]["path"] for e in entries if e.get("event") and e["op"] == "decision"],
+        **_issue_fields(issues_path, entries[0]["run_id"], sorted(receipts)),
     }
+
+
+def _issue_fields(issues_path: str | Path | None, run_id: str, gates: list[str]) -> dict[str, Any]:
+    if issues_path is None:
+        return {"issues_log_head": None, "issues": None}
+    from gdkit.issues import IssueLog, affecting, blocking_reason
+
+    path = Path(issues_path)
+    if not path.exists():
+        return {"issues_log_head": None, "issues": []}
+    log = IssueLog(path)
+    return {
+        "issues_log_head": log.head,
+        "issues": [
+            {
+                "slug": issue["slug"],
+                "kind": issue["kind"],
+                "severity": issue["severity"],
+                "status": issue["status"],
+                "resolution": issue["resolution"],
+                "workaround": issue["workaround"],
+                "issue_url": issue["issue_url"],
+                "blocks": blocking_reason(issue),
+            }
+            for issue in affecting(log, run_id, gates)
+        ],
+    }
+
+
+def _latest_events(entries: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """The params of the latest event entry per op (config, scope, host...)."""
+    latest: dict[str, dict[str, Any]] = {}
+    for entry in entries:
+        if entry.get("event"):
+            latest[entry["op"]] = entry["params"]
+    return latest
 
 
 def write_card(path: str | Path, card: dict[str, Any]) -> Path:
@@ -134,5 +194,10 @@ def audit_card(card_path: str | Path, regenerated: dict[str, Any]) -> list[str]:
     """Field names where the card on disk differs from a card regenerated from the run. Empty means it matches."""
     card_path = Path(card_path)
     on_disk = json.loads(card_path.read_text(encoding="utf-8"))
+    if on_disk.get("card_schema") != regenerated.get("card_schema"):
+        return [
+            f"card_schema: the card on disk is schema {on_disk.get('card_schema')}, "
+            f"current is {regenerated.get('card_schema')}; regenerate it"
+        ]
     keys = sorted(set(on_disk) | set(regenerated))
     return [key for key in keys if on_disk.get(key) != regenerated.get(key)]

@@ -4,6 +4,31 @@ All notable changes are listed here. The format follows Keep a Changelog, and th
 
 ## Unreleased
 
+### Provenance slices 1 to 3
+
+- Receipts carry `receipt_schema` (1). `promote` applies each schema's rules from `RECEIPT_RULES`. A receipt without
+  the field is schema 0 (written by 8cf73ec or 9027e56): verify-only, refused by `promote` and `attestable_hash` with
+  "re-run the gate". An unknown or non-integer schema is refused. **Breaking:** receipts written by 9027e56 must be
+  re-run to promote.
+- `gdkit.audit.verify_run`: a read-only report on every receipt under its own schema (hash, run, which ledger entry it
+  was written against, inputs and log as match/changed/absent, code, pass, attestation including legacy
+  `attest/<run_id>` tags via `git_attestation(..., schema=0)`).
+- `run_gate(capture_log=True)` captures stdout and stderr at the file-descriptor level (subprocesses and earlier
+  logging handlers included) into `logs/<gate>.log.partial` (watchable while the gate runs), renames it to
+  `logs/<gate>.log` when the check returns or raises, and hashes it into the receipt. If a Windows reader blocks the
+  rename, the log is copied instead (`finalised: copied`, `partial_left`). The receipt records the platform and locale
+  encoding next to the hash, because the log keeps the bytes as written. A changed log
+  refuses promote; an absent one is noted in the report. Optional `contract_version` and `census` receipt fields.
+- `Ledger.record_event` marks entries that are not data steps; cards leave them out of the dataset counts. Cards carry
+  `card_schema` (2), and `audit_card` reports an older card as "regenerate it".
+- `gdkit.run` and `gdkit.host`: start a run (freeze first, so a refused freeze can be retried), record host, scope,
+  config, decisions and files as exact bytes with hashes. The model card reads `config.json` (refusing it if changed
+  since recorded), falls back to `model_setup.json`, and shows the recorded hashes, host summary and decisions.
+- `gdkit.issues`: a project-wide hash-chained issue log with observe, again (reopens a resolved issue), triage,
+  workaround, filed and resolve; error fingerprints for dedup; links to a run's ledger head without writing it.
+  `promote` and `attestable_hash` refuse on unresolved issues affecting the run that are blocking with no workaround or
+  degrading and untriaged, and report the issue log head. The model card lists affecting issues.
+
 ### Changed (breaking for gate authors)
 
 - A gate's check must return a dict with a boolean `passed` field. `run_gate` refuses any other result. `promote` and
