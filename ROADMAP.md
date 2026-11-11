@@ -33,7 +33,11 @@ Later lists.
 - Provenance slice 4 (2026-11-11): upstream issue drafts (`gdkit.issues draft`, `amend`) from allow-listed fields,
   refused when they carry private details; triage tracked as its own flag.
 
-279 tests pass locally with `python -m pytest`.
+- Provenance slice 5 (2026-11-11): census rules (`gdkit.census`), the same-machine check in `run_gate`, the
+  append-only check (`gdkit.append_only` and its workflow), and one attestation tag per receipt that signs the issue
+  log head. The workflows are YAML-checked only until they run on GitHub.
+
+323 tests pass locally with `python -m pytest` (1 skipped on Windows).
 
 ## Next
 
@@ -43,9 +47,7 @@ Later lists.
 3. **Contamination check and environment capture merge** (Must 5, 6).
 4. **A defined general-capability check, and the eval harness and prompt hashes in the setup record** (Must 8, 9).
 5. **`gdkit-upgrade` and `installed.json`** (Must 10).
-6. **Provenance slice 5:** a census helper, the append-only ledger check as a gdkit command and a CI job on push, the
-   issue log head inside what an attestation signs, and `require_host` (refuse a gate on a different machine).
-7. **Upgrade WeightSpaceAbliteration** to current gdkit: its vendored copy is 8cf73ec plus an uncommitted
+6. **Upgrade WeightSpaceAbliteration** to current gdkit: its vendored copy is 8cf73ec plus an uncommitted
    `contract_version`/`census` patch while its CI installs clean 8cf73ec. Its gates need a `passed` field and a
    re-run to promote.
 

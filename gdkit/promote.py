@@ -15,8 +15,12 @@ The ledger itself must verify, and every entry must be in registered mode (catch
 Receipt schemas. Each receipt is checked under the rules of the ``receipt_schema`` it was written with
 (``RECEIPT_RULES``), checked right after its hash so the field cannot be edited without detection:
 
-* schema 1 (current): the result needs ``passed: true``; the tag is ``attest/<run_id>/<gate>`` and its subject is
-  exactly the receipt hash. Promotable.
+* schema 1 (current): the result needs ``passed: true``; the tag is ``attest/<run_id>/<gate>/<first 16 hex of the
+  receipt hash>`` (one tag per receipt, so a re-run gate can be approved again and earlier approvals stay), its
+  subject is exactly the receipt hash, and its body has exactly one ``issues-head: <64 hex | none>`` line: the
+  project issue log's head when the approval was signed. ``promote`` requires that signed head to still be an entry
+  of the issue log, so deleting or rewriting the issues a reviewer saw is caught; issues added later are judged by
+  the normal blocking rule. Promotable.
 * schema 0 (no field; receipts written by gdkit 8cf73ec or 9027e56): no pass flag; the tag is ``attest/<run_id>``
   with the hash in its message, as 8cf73ec signed it. 9027e56 already used per-gate tags, but no attestation was
   ever signed with it, so only the 8cf73ec tag form is recognised for schema 0. Verify-only: ``promote`` and ``attestable_hash`` refuse it. Otherwise a failing receipt
@@ -31,21 +35,26 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import subprocess
 from pathlib import Path
 from typing import Any, Callable
 
 from dataclasses import dataclass
 
+from gdkit.census import CensusError, check_result_census, validate_census_dict
 from gdkit.gates import RECEIPT_SCHEMA, RECEIPTS_DIR, Gate, receipt_hash
 from gdkit.issues import DEFAULT_LOG as DEFAULT_ISSUES_LOG
-from gdkit.issues import IssueError, blocking_issues
+from gdkit.issues import IssueError, IssueLog, blocking_issues
 from gdkit.ledger import LedgerError, verify
 from gdkit.prereg import _project_root, check_answers
 from gdkit.pwc_lookup import LOOKUP_OP
 from gdkit.stream_hash import canonical_json_bytes
 
-Attestation = Callable[[str, str, str], bool]  # (run_id, gate name, receipt_hash) -> bool
+# (run_id, gate name, receipt_hash) -> bool, or {"ok": bool, "issues_head": str | None} when the verifier also read
+# the issue log head the approval was signed with (``git_attestation`` does).
+Attestation = Callable[[str, str, str], Any]
+_ISSUES_HEAD = re.compile(r"issues-head: (none|[0-9a-f]{64})")
 
 
 class PromoteError(Exception):
@@ -58,7 +67,7 @@ class ReceiptRules:
 
     promotable: bool
     passed: Callable[[Any], bool | None]  # None: the schema records no pass flag
-    tag: Callable[[str, str], str]  # (run_id, gate) -> tag name
+    tag: Callable[[str, str, str], str]  # (run_id, gate, receipt hash) -> tag name
     message_ok: Callable[[str, str], bool]  # (tag message, receipt hash) -> bool
 
 
@@ -66,13 +75,13 @@ RECEIPT_RULES: dict[int, ReceiptRules] = {
     0: ReceiptRules(
         promotable=False,
         passed=lambda result: None,
-        tag=lambda run_id, gate: f"attest/{run_id}",
+        tag=lambda run_id, gate, digest: f"attest/{run_id}",
         message_ok=lambda message, digest: digest in message,
     ),
     1: ReceiptRules(
         promotable=True,
         passed=lambda result: isinstance(result, dict) and result.get("passed") is True,
-        tag=lambda run_id, gate: f"attest/{run_id}/{gate}",
+        tag=lambda run_id, gate, digest: f"attest/{run_id}/{gate}/{digest[:16]}",
         message_ok=lambda message, digest: message.strip() == digest,
     ),
 }
@@ -140,6 +149,25 @@ def _require_frozen(state: dict, project_path: str | Path) -> None:
         raise PromoteError(problems[0])
 
 
+def _require_signed_issues_head(
+    name: str, signed: str, project_path: str | Path, issues_path: str | Path | None
+) -> None:
+    """The issue log head an approval was signed with must still be an entry of the issue log."""
+    if signed == "none":
+        return  # nothing was recorded when it was signed; anything recorded since is judged by the blocking rule
+    path = Path(issues_path) if issues_path is not None else default_issues_path(project_path)
+    if not path.exists():
+        raise PromoteError(f"{name}: the approval was signed with issue log head {signed[:12]}, but the issue log "
+                           f"{path} is gone")
+    try:
+        hashes = IssueLog(path).entry_hashes()
+    except IssueError as exc:
+        raise PromoteError(f"{name}: {exc}") from exc
+    if signed not in hashes:
+        raise PromoteError(f"{name}: the approval was signed with issue log head {signed[:12]}, which is not in the "
+                           "current issue log; the issues the reviewer saw were rewritten. Re-attest the gate")
+
+
 def default_issues_path(project_path: str | Path) -> Path:
     """The project's issue log: ``.gdkit/issues/log.jsonl`` under the project root."""
     return _project_root(project_path) / DEFAULT_ISSUES_LOG
@@ -197,6 +225,12 @@ def _check_receipt(run_dir: Path, name: str, gate: Gate, state: dict[str, str]) 
     result = receipt.get("result")
     if not rules.passed(result):
         raise PromoteError(f"{name}: the gate did not pass (its receipt's result is {result!r})")
+    try:
+        check_result_census(result)
+        if "census" in receipt:
+            validate_census_dict(receipt["census"])
+    except CensusError as exc:
+        raise PromoteError(f"{name}: {exc}") from exc
     return receipt
 
 
@@ -225,6 +259,7 @@ def promote(
     _require_frozen(state, project_path)
     issues_head = _require_no_blocking_issues(state["run_id"], list(required), project_path, issues_path)
     report: dict[str, str] = {}
+    attestations: dict[str, dict[str, Any]] = {}
     for name in required:
         gate = registry.get(name)
         if gate is None:
@@ -236,10 +271,17 @@ def promote(
                 raise PromoteError(f"{name}: re-running the cheap gate does not reproduce the receipt's result")
             report[name] = "re-run and matched" + _log_note(run_dir, receipt)
         else:
-            if attestation is None or not attestation(state["run_id"], name, receipt["receipt_hash"]):
+            outcome = attestation(state["run_id"], name, receipt["receipt_hash"]) if attestation else False
+            ok = outcome.get("ok") is True if isinstance(outcome, dict) else outcome is True
+            if not ok:
                 raise PromoteError(f"{name}: expensive gate has no valid attestation")
+            signed = outcome.get("issues_head") if isinstance(outcome, dict) else None
+            if signed is not None:
+                _require_signed_issues_head(name, signed, project_path, issues_path)
+            attestations[name] = {"issues_head_signed": signed, "issues_head_checked": signed is not None}
             report[name] = "attested" + _log_note(run_dir, receipt)
-    return {"run_id": state["run_id"], "ledger_head": state["head"], "issues_log_head": issues_head, "gates": report}
+    return {"run_id": state["run_id"], "ledger_head": state["head"], "issues_log_head": issues_head, "gates": report,
+            "attestations": attestations}
 
 
 def attestable_hash(
@@ -271,8 +313,9 @@ def attestable_hash(
 def git_attestation(repo: str | Path, allowed_signers: str | Path, *, schema: int = RECEIPT_SCHEMA) -> Attestation:
     """Attestation via an SSH-signed git tag, named and matched under ``schema``'s rules.
 
-    Schema 1 (the default): ``attest/<run_id>/<gate>``, one tag per expensive gate, subject exactly the receipt
-    hash. Schema 0: ``attest/<run_id>``, message containing the hash; only ``verify_run`` uses it.
+    Schema 1 (the default): ``attest/<run_id>/<gate>/<receipt hash[:16]>``, subject exactly the receipt hash, and a
+    body with exactly one ``issues-head: <64 hex | none>`` line, which the verifier returns for ``promote`` to check.
+    Schema 0: ``attest/<run_id>``, message containing the hash; only ``verify_run`` uses it.
     The tag must verify against ``allowed_signers`` (an OpenSSH allowed-signers file), and the tagged commit
     must contain the run's ledger at ``runs/<run_id>/ledger.jsonl``. That ties the attestation to a committed
     run, not to a loose file on a laptop.
@@ -283,8 +326,8 @@ def git_attestation(repo: str | Path, allowed_signers: str | Path, *, schema: in
     # Schema 0 matched the whole message, schema 1 the subject line.
     message_format = "%(contents)" if schema == 0 else "%(contents:subject)"
 
-    def verify_attestation(run_id: str, gate: str, digest: str) -> bool:
-        tag = rules.tag(run_id, gate)
+    def verify_attestation(run_id: str, gate: str, digest: str) -> Any:
+        tag = rules.tag(run_id, gate, digest)
         check = subprocess.run(
             ["git", "-C", repo, "-c", "gpg.format=ssh", "-c", f"gpg.ssh.allowedSignersFile={signers}", "tag", "-v", tag],
             capture_output=True,
@@ -299,6 +342,16 @@ def git_attestation(repo: str | Path, allowed_signers: str | Path, *, schema: in
         ).stdout
         if not rules.message_ok(message, digest):
             return False
+        signed_head = None
+        if schema != 0:
+            body = subprocess.run(
+                ["git", "-C", repo, "tag", "-l", "--format=%(contents:body)", tag], capture_output=True, text=True
+            ).stdout
+            lines = [line.strip() for line in body.splitlines() if line.strip()]
+            heads = [m.group(1) for m in (_ISSUES_HEAD.fullmatch(line) for line in lines) if m]
+            if len(heads) != 1 or len(lines) != 1:
+                return False
+            signed_head = heads[0]
         commit = subprocess.run(
             ["git", "-C", repo, "rev-list", "-n", "1", tag], capture_output=True, text=True
         ).stdout.strip()
@@ -307,6 +360,8 @@ def git_attestation(repo: str | Path, allowed_signers: str | Path, *, schema: in
             capture_output=True,
             text=True,
         )
-        return in_commit.returncode == 0
+        if in_commit.returncode != 0:
+            return False
+        return True if schema == 0 else {"ok": True, "issues_head": signed_head}
 
     return verify_attestation

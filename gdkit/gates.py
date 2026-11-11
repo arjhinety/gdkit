@@ -21,8 +21,14 @@ is renamed to ``logs/<gate>.log`` (copied instead if a reader blocks the rename,
 path, sha256, size, how it was finalised, platform and locale encoding go in the receipt. gdkit writes the log, not
 the check, so promote's re-run of a cheap gate never writes it.
 
-Optional ``contract_version`` (what a pass means for the project's harness) and ``census`` (what the gate counted)
-are stored in the receipt as given.
+Optional ``contract_version`` (what a pass means for the project's harness) is stored as given. A census (see
+``gdkit.census``), either in the check's result or passed as ``census``, must follow the census rules or no receipt
+is written.
+
+When the run has a recorded host, ``run_gate`` refuses to run the check on a machine that differs from it (see
+``gdkit.host.require_same_host``); ``check_host=False`` turns this off. The receipt's ``host_check`` says whether the
+check ran and against which host record. ``promote``'s re-run of a cheap gate does not check the host, because
+it usually runs on another machine.
 
 Receipts are unsigned. Their ``receipt_hash`` is a sha256 of the body, so an accidental edit is
 caught. It does not stop someone who recomputes the hash. The promote step is what refuses forgery.
@@ -43,6 +49,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+from gdkit.census import Census, CensusError, check_result_census, validate_census_dict
 from gdkit.stream_hash import canonical_json_bytes
 
 RECEIPTS_DIR = "receipts"
@@ -154,6 +161,18 @@ def _finalise_log(partial: Path, final: Path) -> tuple[str, bool]:
             return "copied", True
 
 
+def _host_check(run_dir: Path, name: str, enabled: bool) -> dict[str, Any]:
+    """The same-machine check (see ``gdkit.host.require_same_host``), as recorded in the receipt."""
+    if not enabled:
+        return {"checked": False, "reason": "disabled by the caller (check_host=False)"}
+    from gdkit.host import HostError, require_same_host
+
+    try:
+        return require_same_host(run_dir)
+    except HostError as exc:
+        raise GateError(f"{name}: {exc}") from exc
+
+
 def run_gate(
     run_dir: str | Path,
     gate: Gate,
@@ -164,6 +183,7 @@ def run_gate(
     capture_log: bool = False,
     contract_version: str | None = None,
     census: Any = None,
+    check_host: bool = True,
 ) -> Path:
     """Run ``gate`` on ``run_dir`` and write its receipt. Returns the receipt path.
 
@@ -171,6 +191,7 @@ def run_gate(
     before the check runs, so the receipt records what the check actually saw.
     """
     run_dir = Path(run_dir)
+    host_check = _host_check(run_dir, gate.name, check_host)
     input_hashes = {rel: sha256_path(run_dir / rel) for rel in inputs}
     log_bytes = None
     if capture_log:
@@ -191,6 +212,15 @@ def run_gate(
     else:
         result = gate.check(run_dir)
     check_result(gate.name, result)
+    try:
+        check_result_census(result)
+        if isinstance(census, Census):
+            census.validate()
+            census = census.to_dict()
+        elif census is not None:
+            validate_census_dict(census)
+    except CensusError as exc:
+        raise GateError(f"{gate.name}: {exc}") from exc
     body: dict[str, Any] = {
         "receipt_schema": RECEIPT_SCHEMA,
         "run_id": run_id,
@@ -200,6 +230,7 @@ def run_gate(
         "inputs": input_hashes,
         "result": result,
         "ledger_head": ledger_head,
+        "host_check": host_check,
     }
     if log_bytes is not None:
         body["log"] = {

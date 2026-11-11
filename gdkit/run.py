@@ -2,6 +2,7 @@
 
     python -m gdkit.run start  --runs-dir runs --run-id ID --mode explore|registered --project .gdkit/project.yaml
     python -m gdkit.run host   RUN_DIR [--package NAME ...] [--probe "COMMAND ARGS" ...]
+                               (with neither option, a re-record reuses the packages and probes in host.json)
     python -m gdkit.run scope  RUN_DIR --json FILE
     python -m gdkit.run config RUN_DIR --json FILE
     python -m gdkit.run decide RUN_DIR --json FILE
@@ -206,10 +207,16 @@ def main(argv: list[str] | None = None) -> int:
         else:
             ledger = open_ledger(args.run_dir)
             if args.command == "host":
-                from gdkit.host import record_host
+                from gdkit.host import HOST_FILE, record_host
 
-                entry = record_host(ledger, args.run_dir, packages=args.package,
-                                    probes=[shlex.split(p) for p in args.probe])
+                packages, probes = args.package, [shlex.split(p) for p in args.probe]
+                previous = Path(args.run_dir) / HOST_FILE
+                if not packages and not probes and previous.is_file():
+                    # Re-recording: keep what was checked before, so a re-record cannot quietly drop a probe.
+                    full = json.loads(previous.read_text(encoding="utf-8"))
+                    packages = list(full.get("packages", {}))
+                    probes = [probe["command"] for probe in full.get("probes", [])]
+                entry = record_host(ledger, args.run_dir, packages=packages, probes=probes)
             elif args.command == "record":
                 entry = record_file(ledger, args.run_dir, args.op, args.file)
             else:

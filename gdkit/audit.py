@@ -120,7 +120,10 @@ def verify_run(
             item["attestation"] = "not checked"
         else:
             verifier = git_attestation(attestation_repo, allowed_signers, schema=schema)
-            ok = run_id is not None and verifier(run_id, name, receipt.get("receipt_hash", ""))
+            outcome = verifier(run_id, name, receipt.get("receipt_hash", "")) if run_id is not None else False
+            ok = outcome.get("ok") is True if isinstance(outcome, dict) else outcome is True
             item["attestation"] = "verified" if ok else "not verified"
+            if isinstance(outcome, dict):
+                item["attestation_issues_head"] = outcome.get("issues_head")
 
     return {"run_id": run_id, "ledger": ledger, "receipts": receipts, "problems": problems}

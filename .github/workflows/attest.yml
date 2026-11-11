@@ -16,7 +16,9 @@
 #   (no pip install, no python), re-checks the hash format, signs the tag and pushes it.
 # A step in one job cannot change the PATH, environment or files of another job, which is the point.
 #
-# One tag per expensive gate: attest/<run_id>/<gate>. Its message is exactly the receipt hash.
+# One tag per receipt: attest/<run_id>/<gate>/<first 16 hex of the receipt hash>, so a re-run gate can be approved
+# again. The tag subject is exactly the receipt hash; the body is one line, issues-head: <issue log head | none>,
+# which promote requires to still be an entry of the issue log.
 name: attest
 
 on:
@@ -46,6 +48,7 @@ jobs:
       contents: read
     outputs:
       digest: ${{ steps.receipt.outputs.digest }}
+      issues_head: ${{ steps.receipt.outputs.issues_head }}
     env:
       RUN_ID: ${{ inputs.run_id }}
       GATE: ${{ inputs.gate }}
@@ -82,7 +85,13 @@ jobs:
             echo "refused: the receipt hash is not a sha256 hex string" >&2
             exit 1
           fi
+          HEAD_LINE="$(python -m gdkit.cli --registry "$REGISTRY" issues-head --project .gdkit/project.yaml)"
+          if ! printf '%s' "$HEAD_LINE" | grep -Eq '^(none|[0-9a-f]{64})$'; then
+            echo "refused: the issue log head is not none or a sha256 hex string" >&2
+            exit 1
+          fi
           echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+          echo "issues_head=$HEAD_LINE" >> "$GITHUB_OUTPUT"
 
   sign:
     needs: validate
@@ -95,6 +104,7 @@ jobs:
       RUN_ID: ${{ inputs.run_id }}
       GATE: ${{ inputs.gate }}
       DIGEST: ${{ needs.validate.outputs.digest }}
+      ISSUES_HEAD: ${{ needs.validate.outputs.issues_head }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -115,6 +125,10 @@ jobs:
             echo "refused: the receipt hash is not a sha256 hex string" >&2
             exit 1
           fi
+          if ! printf '%s' "$ISSUES_HEAD" | grep -Eq '^(none|[0-9a-f]{64})$'; then
+            echo "refused: the issue log head is not none or a sha256 hex string" >&2
+            exit 1
+          fi
           test -f "runs/$RUN_ID/ledger.jsonl" || { echo "refused: runs/$RUN_ID/ledger.jsonl is not committed" >&2; exit 1; }
 
       - name: Sign and push the attestation tag
@@ -131,6 +145,7 @@ jobs:
           git config user.email "attest@gdkit.invalid"
           git config gpg.format ssh
           git config user.signingkey "$KEY_FILE"
-          git tag -s "attest/$RUN_ID/$GATE" -m "$DIGEST"
+          TAG="attest/$RUN_ID/$GATE/${DIGEST:0:16}"
+          git tag -s "$TAG" -m "$DIGEST" -m "issues-head: $ISSUES_HEAD"
           AUTH="$(printf 'x-access-token:%s' "$PUSH_TOKEN" | base64 -w0)"
-          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $AUTH" push origin "refs/tags/attest/$RUN_ID/$GATE"
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $AUTH" push origin "refs/tags/$TAG"

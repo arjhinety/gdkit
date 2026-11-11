@@ -159,12 +159,26 @@ def test_an_absent_log_is_reported_not_refused(tmp_path):
 
 
 def test_contract_version_and_census_are_stored_and_hashed(tmp_path):
+    from gdkit.census import Census
+
     run = make_run(tmp_path)
+    census = Census("noisy")
+    census.discover("data.csv")
+    census.passed_item("data.csv")
     path = run_gate(run, NOISY, inputs=[], run_id=RUN_ID, ledger_head=_head(run),
-                    contract_version="split-v2", census={"rows": 3})
+                    contract_version="split-v2", census=census)
     body = json.loads(path.read_text(encoding="utf-8"))
-    assert body["contract_version"] == "split-v2" and body["census"] == {"rows": 3}
+    assert body["contract_version"] == "split-v2"
+    assert (body["census"]["discovered"], body["census"]["passed"]) == (1, 1)
     assert body["receipt_hash"] == receipt_hash(body)
+
+
+def test_a_free_form_census_is_refused(tmp_path):
+    from gdkit.gates import GateError
+
+    run = make_run(tmp_path)
+    with pytest.raises(GateError, match="census discovered must be a non-negative integer"):
+        run_gate(run, NOISY, inputs=[], run_id=RUN_ID, ledger_head=_head(run), census={"rows": 3})
 
 
 # --- verify_run: read-only report, any schema ------------------------------------------------

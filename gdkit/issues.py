@@ -112,6 +112,10 @@ class IssueLog:
     def head(self) -> str | None:
         return self._entries[-1]["entry_hash"] if self._entries else None
 
+    def entry_hashes(self) -> set[str]:
+        """Every entry hash in the log, for checking that a signed head is still part of it."""
+        return {entry["entry_hash"] for entry in self._entries}
+
     def _append(self, event: str, slug: str, data: dict[str, Any]) -> dict[str, Any]:
         size = self.path.stat().st_size if self.path.exists() else 0
         if size != self._size:

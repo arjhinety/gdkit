@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import getpass
 import hashlib
+import json
 import platform
 import subprocess
 import sys
@@ -110,6 +111,77 @@ def host_summary(full: dict[str, Any]) -> dict[str, Any]:
             for probe in full["probes"]
         ],
     }
+
+
+class HostError(ValueError):
+    """This machine is not the one recorded for the run, or the host record cannot be checked."""
+
+
+def _latest_host_entry(run_dir: Path) -> dict[str, Any] | None:
+    ledger = run_dir / "ledger.jsonl"
+    if not ledger.is_file():
+        return None
+    latest = None
+    for line in ledger.read_text(encoding="utf-8").splitlines():
+        if line.strip():
+            entry = json.loads(line)
+            if entry.get("event") and entry.get("op") == "host":
+                latest = entry
+    return latest
+
+
+def _differences(recorded: Any, current: Any, prefix: str = "") -> list[str]:
+    if isinstance(recorded, dict) and isinstance(current, dict):
+        out = []
+        for key in sorted(set(recorded) | set(current)):
+            out += _differences(recorded.get(key), current.get(key), f"{prefix}.{key}" if prefix else key)
+        return out
+    if isinstance(recorded, list) and isinstance(current, list) and len(recorded) == len(current):
+        out = []
+        for index, (a, b) in enumerate(zip(recorded, current)):
+            out += _differences(a, b, f"{prefix}[{index}]")
+        return out
+    return [] if recorded == current else [f"{prefix}: recorded {recorded!r}, now {current!r}"]
+
+
+def require_same_host(run_dir: str | Path) -> dict[str, Any]:
+    """Refuse (HostError) unless this machine matches the run's latest recorded host.
+
+    Returns what the receipt should say about the check: ``{"checked": True, "host_sha256": ...}``, or
+    ``{"checked": False, "reason": ...}`` when the run has no host entry. The comparison re-collects the host with
+    the same packages and probe commands (read from ``host.json``, which must still match its recorded hash) and
+    compares every summary field except the git commit and dirty flag, which change as the run writes files.
+    """
+    run_dir = Path(run_dir)
+    entry = _latest_host_entry(run_dir)
+    if entry is None:
+        return {"checked": False, "reason": "the run has no host entry"}
+    params = entry["params"]
+    remedy = (f"if this machine is meant to run the gate, re-record it with python -m gdkit.run host "
+              f"{run_dir.as_posix()} (it reuses the packages and probes in host.json); re-recording adds a ledger "
+              "entry, so receipts written before it become stale")
+    host_file = run_dir / params["path"]
+    if not host_file.is_file():
+        summary = params.get("summary") or {}
+        packages = " ".join(f"--package {name}" for name in summary.get("packages", {}) if name not in ALWAYS)
+        probes = ", ".join(p.get("name") or "?" for p in summary.get("probes", []))
+        raise HostError(
+            f"{params['path']} is missing on this machine, so it is not the recorded host. If this machine is meant "
+            f"to run the gate, re-record it with the same packages and probes as before: python -m gdkit.run host "
+            f"{run_dir.as_posix()} {packages} --probe \"...\" for each recorded probe ({probes or 'none'}); "
+            "re-recording adds a ledger entry, so receipts written before it become stale"
+        )
+    if hashlib.sha256(host_file.read_bytes()).hexdigest() != params["sha256"]:
+        raise HostError(f"{params['path']} does not match its recorded hash; {remedy}")
+    full = json.loads(host_file.read_text(encoding="utf-8"))
+    now = host_summary(collect_host(packages=list(full["packages"]),
+                                    probes=[probe["command"] for probe in full["probes"]]))
+    recorded = {k: v for k, v in params["summary"].items() if k != "git"}
+    current = {k: v for k, v in now.items() if k != "git"}
+    differences = _differences(recorded, current)
+    if differences:
+        raise HostError("this machine differs from the recorded host: " + "; ".join(differences) + f"; {remedy}")
+    return {"checked": True, "host_sha256": params["sha256"]}
 
 
 def record_host(

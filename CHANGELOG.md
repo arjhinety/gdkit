@@ -4,6 +4,25 @@ All notable changes are listed here. The format follows Keep a Changelog, and th
 
 ## Unreleased
 
+### Provenance slice 5
+
+- Receipt schema 1 changed in place (census rules, attestation tag name and body) relative to e7f3133. No
+  attestation had been signed and no study used those receipts, so the schema number was kept.
+- `gdkit.census`: `Census` with item-level rules (one outcome per discovered item, reasons for failures, skips and
+  blocks, population policies). **Breaking:** `run_gate` and `promote` now refuse a census that breaks the rules,
+  including the free-form `census=` values slice 1 stored as given, and a `passed: true` result whose census has
+  failures.
+- **Breaking:** `run_gate` refuses to run a gate when the run has a recorded host and this machine differs from it
+  (`gdkit.host.require_same_host`); `check_host=False` opts out. Receipts carry `host_check`.
+- `python -m gdkit.append_only --base SHA` and `.github/workflows/append-only.yml`: ledgers and the issue log may only
+  grow, run files may not be deleted, `run.json` may not change, and rewritten receipts and side files must be
+  accounted for by the ledger or a receipt.
+- **Breaking (no tags existed):** schema 1 attestation tags are `attest/<run_id>/<gate>/<receipt hash[:16]>`, one per
+  receipt, with a body of exactly one `issues-head: <head | none>` line. `git_attestation` returns
+  `{"ok", "issues_head"}`, and `promote` requires the signed head to still be in the issue log. The promote report
+  has `attestations`, saying per gate whether the head was checked. `python -m gdkit.cli ... issues-head` prints the
+  head for the attestation workflow.
+
 ### Provenance slice 4
 
 - `python -m gdkit.issues draft SLUG` writes an upstream issue draft to `.gdkit/issues/drafts/<slug>.md` (the folder

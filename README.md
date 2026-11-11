@@ -44,8 +44,22 @@ vendored under `vendor/` (see NOTICE and SOURCE.lock).
   run's username or hostname, or a pattern from `.gdkit/issues/deny.txt`. `amend` rewrites the issue's text. A clean
   draft is recorded by hash and gdkit prints the GitHub new-issue URL; filing it is up to you.
 - **Promotion.** `promote()` checks each required receipt, refuses any whose result is not `passed: true`, re-runs cheap
-  gates, and requires an SSH-signed attestation for expensive ones. Each expensive gate has its own tag,
-  `attest/<run_id>/<gate>`, whose message is exactly the receipt hash. It refuses explore runs.
+  gates, and requires an SSH-signed attestation for expensive ones. Each receipt has its own tag,
+  `attest/<run_id>/<gate>/<first 16 hex of the receipt hash>`, so a re-run gate can be approved again. The tag's
+  subject is exactly the receipt hash and its body is one line, `issues-head: <issue log head | none>`. `promote`
+  requires that signed head to still be an entry of the issue log, so rewriting or deleting the issues the reviewer
+  saw is caught. It refuses explore runs.
+- **Census.** A gate can return `{"passed": ..., "census": Census(...).to_dict()}` (`gdkit.census`): what it
+  discovered, passed, failed, skipped and blocked. Every discovered item needs exactly one outcome, every failure,
+  skip and block a reason, and a required population may not be empty. `run_gate` and `promote` refuse a census that
+  breaks these rules or a `passed: true` result whose census has failures.
+- **Same machine.** When a run has a recorded host, `run_gate` refuses to run a gate on a machine whose host summary
+  differs (Python, OS, recorded package versions, probe output), naming the field. `check_host=False` turns it off,
+  and the receipt's `host_check` says which. `promote` does not check the host, since CI is another machine.
+- **Append-only.** `python -m gdkit.append_only --base SHA` checks that run ledgers and the issue log only grew
+  between two commits, that no run file was deleted and `run.json` did not change, and that any rewritten receipt or
+  side file is accounted for by the ledger or a receipt. `.github/workflows/append-only.yml` runs it on push and
+  pull requests; copy it into a study repository and make it a required check for it to count as enforcement.
 - **Pre-registration.** The first ledger entry of a registered run holds the study's answers. `promote` and `attest` refuse
   a run whose answers differ from that frozen copy, and they name the changed answer.
 - **Answers given after an explore run.** An answer given after an explore run may have been chosen after seeing the
@@ -126,6 +140,15 @@ Copy `skills/overfit-clinic/` into `~/.claude/skills/`, then run `/overfit-clini
 - The same user can still bypass some checks. See `ROADMAP.md`.
 - A captured gate log holds the bytes as written, so line endings differ by OS (CRLF on Windows from the console
   streams and child processes). The same check gives a different log hash on Windows and Linux.
+- The same-machine check means a run's environment must stay frozen: upgrading a recorded package (gdkit included)
+  mid-run makes later gates refuse, and re-recording the host adds a ledger entry that makes earlier receipts stale.
+  Upgrade by starting a new run, and leave out probes whose output changes (temperature, memory in use).
+- The append-only check compares commits; it does not stop a force-push that rewrites history. That needs branch
+  protection.
+- The append-only check accepts a rewritten side file whose new hash appears anywhere in the run's ledger or
+  receipts, not only in a newly added entry.
+- An attestation signed with `issues-head: none` passes even if an issue log existed but had not been committed.
+- `check_host=False` is visible only in the receipt's `host_check`. `verify_run` does not apply the census rules.
 - Issue blocks are cleared by events anyone can append (a workaround, a triage, a resolution). Nothing checks who
   appended them.
 

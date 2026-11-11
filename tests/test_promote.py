@@ -173,6 +173,12 @@ def _git(repo, *args, key=None):
     subprocess.run(cmd + list(args), check=True, capture_output=True, text=True)
 
 
+def _sign(repo, run_id, gate, digest, key, head="none"):
+    """Sign an attestation tag the way the workflow does: per-receipt name, hash subject, issues-head body."""
+    _git(repo, "tag", "-s", f"attest/{run_id}/{gate}/{digest[:16]}", "-m", digest, "-m", f"issues-head: {head}",
+         key=key)
+
+
 @needs_ssh
 def test_attestation_from_an_allowed_signer_is_accepted(tmp_path):
     repo = tmp_path / "attest-repo"
@@ -185,8 +191,8 @@ def test_attestation_from_an_allowed_signer_is_accepted(tmp_path):
     owner = _keypair(tmp_path, "owner")
     signers = _allowed_signers(tmp_path / "allowed_signers", "owner@gdkit", Path(str(owner) + ".pub"))
     digest = "d" * 64
-    _git(repo, "tag", "-s", "attest/run-1/train", "-m", digest, key=owner)
-    assert git_attestation(repo, signers)("run-1", "train", digest) is True
+    _sign(repo, "run-1", "train", digest, owner)
+    assert git_attestation(repo, signers)("run-1", "train", digest) == {"ok": True, "issues_head": "none"}
 
 
 @needs_ssh
@@ -202,7 +208,7 @@ def test_attestation_from_a_key_not_in_allowed_signers_is_refused(tmp_path):
     intruder = _keypair(tmp_path, "intruder")
     signers = _allowed_signers(tmp_path / "allowed_signers", "owner@gdkit", Path(str(owner) + ".pub"))
     digest = "e" * 64
-    _git(repo, "tag", "-s", "attest/run-1/train", "-m", digest, key=intruder)
+    _sign(repo, "run-1", "train", digest, intruder)
     assert git_attestation(repo, signers)("run-1", "train", digest) is False
 
 
@@ -242,7 +248,7 @@ def test_tag_on_a_commit_without_the_run_is_refused(tmp_path):
     owner = _keypair(tmp_path, "owner")
     signers = _allowed_signers(tmp_path / "allowed_signers", "owner@gdkit", Path(str(owner) + ".pub"))
     digest = "f" * 64
-    _git(repo, "tag", "-s", "attest/run-1/train", "-m", digest, key=owner)
+    _sign(repo, "run-1", "train", digest, owner)
     assert git_attestation(repo, signers)("run-1", "train", digest) is False
 
 
@@ -341,11 +347,11 @@ def _attest_repo(tmp_path):
 def test_two_expensive_gates_in_one_run_are_attested_separately(tmp_path):
     repo, owner, signers = _attest_repo(tmp_path)
     train_digest, judge_digest = "1" * 64, "2" * 64
-    _git(repo, "tag", "-s", f"attest/{RUN_ID}/train", "-m", train_digest, key=owner)
-    _git(repo, "tag", "-s", f"attest/{RUN_ID}/judge", "-m", judge_digest, key=owner)
+    _sign(repo, RUN_ID, "train", train_digest, owner)
+    _sign(repo, RUN_ID, "judge", judge_digest, owner)
     verify = git_attestation(repo, signers)
-    assert verify(RUN_ID, "train", train_digest) is True
-    assert verify(RUN_ID, "judge", judge_digest) is True
+    assert verify(RUN_ID, "train", train_digest)["ok"] is True
+    assert verify(RUN_ID, "judge", judge_digest)["ok"] is True
     assert verify(RUN_ID, "train", judge_digest) is False  # one gate's approval does not cover another
 
 
@@ -353,5 +359,113 @@ def test_two_expensive_gates_in_one_run_are_attested_separately(tmp_path):
 def test_a_tag_whose_message_only_contains_the_digest_is_refused(tmp_path):
     repo, owner, signers = _attest_repo(tmp_path)
     digest = "3" * 64
-    _git(repo, "tag", "-s", f"attest/{RUN_ID}/train", "-m", f"not approved: {digest}", key=owner)
+    _git(repo, "tag", "-s", f"attest/{RUN_ID}/train/{digest[:16]}", "-m", f"not approved: {digest}",
+         "-m", "issues-head: none", key=owner)
     assert git_attestation(repo, signers)(RUN_ID, "train", digest) is False
+
+
+# --- slice 5: one tag per receipt, and the signed issue log head -------------------------------
+
+
+def _run_with_issue_log(tmp_path):
+    """A run whose train receipt can be attested, a project issue log with one entry, and a signing repo."""
+    from gdkit.issues import IssueLog
+
+    run = make_run(tmp_path)
+    log = IssueLog(tmp_path / "issues.jsonl")
+    log.observe("seen", kind="data", severity="cosmetic", summary="seen by the reviewer")
+    repo, owner, signers = _attest_repo(tmp_path)
+    digest = load_receipt(run, "train")["receipt_hash"]
+    return run, log, repo, owner, signers, digest
+
+
+def _promote_train(run, repo, signers, log_path):
+    return promote(run, REGISTRY, ["train"], attestation=git_attestation(repo, signers), project_path=proj(run),
+                   issues_path=log_path)
+
+
+@needs_ssh
+def test_a_signed_head_still_in_the_log_promotes_even_after_the_log_grew(tmp_path):
+    run, log, repo, owner, signers, digest = _run_with_issue_log(tmp_path)
+    signed = log.head
+    _sign(repo, RUN_ID, "train", digest, owner, head=signed)
+    log.observe("later", kind="data", severity="cosmetic", summary="found after approval")
+    report = _promote_train(run, repo, signers, log.path)
+    assert report["attestations"]["train"] == {"issues_head_signed": signed, "issues_head_checked": True}
+    assert signed != log.head  # the log grew after the approval
+
+
+@needs_ssh
+def test_a_rewritten_or_deleted_issue_log_refuses_the_signed_approval(tmp_path):
+    from gdkit.issues import IssueLog
+
+    run, log, repo, owner, signers, digest = _run_with_issue_log(tmp_path)
+    _sign(repo, RUN_ID, "train", digest, owner, head=log.head)
+    log.path.unlink()
+    rewritten = IssueLog(log.path)
+    rewritten.observe("other", kind="data", severity="cosmetic", summary="a different history")
+    with pytest.raises(PromoteError, match="not in the current issue log"):
+        _promote_train(run, repo, signers, log.path)
+    log.path.unlink()
+    with pytest.raises(PromoteError, match="the issue log .* is gone"):
+        _promote_train(run, repo, signers, log.path)
+
+
+@needs_ssh
+def test_none_signed_then_a_log_created_still_promotes(tmp_path):
+    from gdkit.issues import IssueLog
+
+    run = make_run(tmp_path)
+    repo, owner, signers = _attest_repo(tmp_path)
+    _sign(repo, RUN_ID, "train", load_receipt(run, "train")["receipt_hash"], owner, head="none")
+    log = IssueLog(tmp_path / "issues.jsonl")
+    log.observe("new", kind="data", severity="cosmetic", summary="after approval")
+    assert _promote_train(run, repo, signers, log.path)["attestations"]["train"]["issues_head_signed"] == "none"
+
+
+@needs_ssh
+@pytest.mark.parametrize(
+    "body",
+    [[], ["issues-head: none", "issues-head: none"], ["issues-head: NONE"], ["issues-head: abc"],
+     ["issues-head: none", "extra line"]],
+)
+def test_a_tag_without_exactly_one_valid_issues_head_line_is_refused(tmp_path, body):
+    repo, owner, signers = _attest_repo(tmp_path)
+    digest = "4" * 64
+    args = ["tag", "-s", f"attest/{RUN_ID}/train/{digest[:16]}", "-m", digest]
+    for line in body:
+        args += ["-m", line]
+    _git(repo, *args, key=owner)
+    assert git_attestation(repo, signers)(RUN_ID, "train", digest) is False
+
+
+@needs_ssh
+def test_a_re_run_gate_gets_its_own_tag_and_the_old_approval_stays(tmp_path):
+    repo, owner, signers = _attest_repo(tmp_path)
+    first, second = "5" * 64, "6" * 64
+    _sign(repo, RUN_ID, "train", first, owner)
+    _sign(repo, RUN_ID, "train", second, owner)  # would fail if the tag name were per gate
+    verify = git_attestation(repo, signers)
+    assert verify(RUN_ID, "train", first)["ok"] and verify(RUN_ID, "train", second)["ok"]
+
+
+def test_a_plain_bool_verifier_is_reported_as_not_checking_the_issue_head(tmp_path):
+    run = make_run(tmp_path)
+    report = promote(run, REGISTRY, REQUIRED, attestation=ACCEPT, project_path=proj(run))
+    assert report["attestations"]["train"] == {"issues_head_signed": None, "issues_head_checked": False}
+
+
+def test_the_cli_prints_the_issue_log_head(tmp_path, capsys):
+    from gdkit.cli import main
+    from gdkit.issues import IssueLog
+
+    root = tmp_path / "study"
+    (root / ".gdkit").mkdir(parents=True)
+    project = root / ".gdkit" / "project.yaml"
+    project.write_text("study_question: q\n", encoding="utf-8")
+    assert main(["--registry", "gates_fixture:REGISTRY", "issues-head", "--project", str(project)]) == 0
+    assert capsys.readouterr().out.strip() == "none"
+    log = IssueLog(root / ".gdkit" / "issues" / "log.jsonl")
+    log.observe("a", kind="data", severity="cosmetic", summary="s")
+    assert main(["--registry", "gates_fixture:REGISTRY", "issues-head", "--project", str(project)]) == 0
+    assert capsys.readouterr().out.strip() == log.head
